@@ -1,0 +1,11 @@
+subject: "Goldline GRC: Vous avez ${task_count} tâche(s) en retard"
+body: |
+  Bonjour,
+
+  Les tâches suivantes sont en retard et toujours en attente :
+
+  ${task_list}
+
+  Veuillez vous connecter à votre portail Goldline GRC pour compléter ou mettre à jour ces tâches : [Accéder à Goldline GRC](${ciso_assistant_url})
+
+  Merci.

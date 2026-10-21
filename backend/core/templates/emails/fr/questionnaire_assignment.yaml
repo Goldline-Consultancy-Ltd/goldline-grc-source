@@ -1,0 +1,18 @@
+subject: "Goldline GRC : Un questionnaire vous a été attribué"
+body: |
+  <img src="${ciso_assistant_url}/goldline-grc-mark-512.png" alt="Goldline GRC" width="72">
+
+  **Votre plateforme de gestion GRC tout-en-un**
+
+  Bonjour,
+
+  Un questionnaire vous a été attribué. Cliquez ci-dessous pour y accéder :
+
+  [Accéder au questionnaire](${questionnaire_url})
+
+  En cas de problème avec le lien, copiez et collez l'URL suivante dans votre navigateur :
+  ${questionnaire_url}
+
+  Cordialement,
+  Goldline GRC
+  Goldline Consultancy · grc@goldlineconsultancy.co.uk · goldlineconsultancy.co.uk

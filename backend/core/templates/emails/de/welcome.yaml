@@ -1,0 +1,24 @@
+subject: "Willkommen bei Goldline GRC!"
+body: |
+  <img src="${ciso_assistant_url}/goldline-grc-mark-512.png" alt="Goldline GRC" width="72">
+
+  ## Willkommen bei Goldline GRC!
+
+  **Ihre zentrale GRC-Managementplattform**
+
+  Sie haben Zugriff auf Goldline GRC erhalten. Legen Sie zum Einstieg über den folgenden Link Ihr Passwort fest:
+
+  [Passwort festlegen](${set_password_url})
+
+  Falls der Link nicht funktioniert, kopieren Sie die folgende Adresse in Ihren Browser:
+  ${set_password_url}
+
+  Dieser Link kann nur einmal verwendet werden. Falls er abgelaufen ist, öffnen Sie [Ihre Instanz](${ciso_assistant_url}) und fordern Sie das Zurücksetzen des Passworts an.
+
+  Falls weder Sie noch Ihre Organisation diese Anfrage gestellt haben, können Sie diese E-Mail ignorieren.
+
+  Weitere Informationen über Goldline Consultancy finden Sie [hier](https://goldlineconsultancy.co.uk/).
+
+  Freundliche Grüße
+  Goldline GRC
+  Goldline Consultancy · grc@goldlineconsultancy.co.uk · goldlineconsultancy.co.uk

@@ -1,0 +1,17 @@
+subject: "Goldline GRC: Ihnen wurde '${control_name}' zugewiesen"
+body: |
+  Hallo,
+
+  Ihnen wurde folgende Maßnahme zugewiesen:
+
+  - Name: ${control_name}
+  - Beschreibung: ${control_description}
+  - Referenz-ID: ${control_ref_id}
+  - Status: ${control_status}
+  - Priorität: ${control_priority}
+  - ETA: ${control_eta}
+  - Bereich: ${folder_name}
+
+  Melden Sie sich in Ihrem Goldline-GRC-Portal an, um diese Maßnahme anzuzeigen und zu verwalten: [Goldline GRC öffnen](${ciso_assistant_url})
+
+  Vielen Dank.

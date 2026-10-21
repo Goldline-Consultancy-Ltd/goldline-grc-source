@@ -1,0 +1,11 @@
+subject: "Goldline GRC: Tâche à échéance dans ${days_remaining} jour(s)"
+body: |
+  Bonjour,
+
+  Vous avez ${task_count} tâche(s) à échéance dans ${days_remaining} jour(s) :
+
+  ${task_list}
+
+  Veuillez vous connecter à votre portail Goldline GRC pour réviser et compléter ces tâches : [Accéder à Goldline GRC](${ciso_assistant_url})
+
+  Merci.

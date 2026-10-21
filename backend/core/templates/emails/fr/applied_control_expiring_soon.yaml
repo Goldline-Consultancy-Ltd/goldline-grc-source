@@ -1,0 +1,11 @@
+subject: "Goldline GRC: Mesure expirant dans ${days_remaining} jour(s)"
+body: |
+  Bonjour,
+
+  Vous avez ${control_count} mesure(s) expirant dans ${days_remaining} jour(s):
+
+  ${control_list}
+
+  Veuillez vous connecter à votre portail Goldline GRC pour réviser et compléter ces mesures : [Accéder à Goldline GRC](${ciso_assistant_url})
+
+  Merci.

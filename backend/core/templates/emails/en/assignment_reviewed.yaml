@@ -1,0 +1,13 @@
+subject: "Goldline GRC: Your assignment on '${assessment_name}' has been ${decision}"
+body: |
+  Hello,
+
+  Your assignment on the following audit has been reviewed:
+
+  - Audit: ${assessment_name}
+  - Decision: ${decision}
+  ${reviewer_observation}
+
+  Please log in to your Goldline GRC portal for more details: [Go to Goldline GRC](${ciso_assistant_url}/auditee-dashboard)
+
+  Thank you.

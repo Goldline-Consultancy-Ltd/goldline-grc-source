@@ -1,0 +1,18 @@
+subject: "Goldline GRC: Ihnen wurde ein Fragebogen zugewiesen"
+body: |
+  <img src="${ciso_assistant_url}/goldline-grc-mark-512.png" alt="Goldline GRC" width="72">
+
+  **Ihre zentrale GRC-Managementplattform**
+
+  Hallo,
+
+  Ihnen wurde ein Fragebogen zugewiesen. Klicken Sie auf den folgenden Link, um fortzufahren:
+
+  [Fragebogen öffnen](${questionnaire_url})
+
+  Falls der Link nicht funktioniert, kopieren Sie die folgende Adresse in Ihren Browser:
+  ${questionnaire_url}
+
+  Freundliche Grüße
+  Goldline GRC
+  Goldline Consultancy · grc@goldlineconsultancy.co.uk · goldlineconsultancy.co.uk

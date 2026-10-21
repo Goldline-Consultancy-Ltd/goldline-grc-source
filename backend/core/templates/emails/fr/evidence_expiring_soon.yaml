@@ -1,0 +1,11 @@
+subject: "Goldline GRC: Preuve expirant dans ${days_remaining} jour(s)"
+body: |
+  Bonjour,
+
+  Vous avez ${evidence_count} preuve(s) expirant dans ${days_remaining} jour(s):
+
+  ${evidence_list}
+
+  Veuillez vous connecter à votre portail Goldline GRC pour réviser et mettre à jour ces preuves : [Accéder à Goldline GRC](${ciso_assistant_url})
+
+  Merci.

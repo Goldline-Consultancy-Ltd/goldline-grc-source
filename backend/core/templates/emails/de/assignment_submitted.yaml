@@ -1,0 +1,13 @@
+subject: "Goldline GRC: Aufgabe für '${assessment_name}' eingereicht"
+body: |
+  Hallo,
+
+  Für das folgende Audit wurde eine Aufgabe zur Prüfung eingereicht:
+
+  - Audit: ${assessment_name}
+  - Eingereicht von: ${actor_names}
+  - Bewertete Anforderungen: ${requirement_count}
+
+  Melden Sie sich in Ihrem Goldline-GRC-Portal an, um die Einreichung zu prüfen: [Goldline GRC öffnen](${ciso_assistant_url})
+
+  Vielen Dank.

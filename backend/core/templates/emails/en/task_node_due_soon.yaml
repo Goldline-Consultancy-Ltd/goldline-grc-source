@@ -1,0 +1,11 @@
+subject: "Goldline GRC: Task due in ${days_remaining} day(s)"
+body: |
+  Hello,
+
+  You have ${task_count} task(s) due in ${days_remaining} day(s):
+
+  ${task_list}
+
+  Please log in to your Goldline GRC portal to review and complete these tasks: [Go to Goldline GRC](${ciso_assistant_url})
+
+  Thank you.

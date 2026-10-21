@@ -1,0 +1,11 @@
+subject: "Goldline GRC: Evidence expired since ${expired_since} day(s)"
+body: |
+  Hello,
+
+  You have ${evidence_count} evidence(s) expired since ${expired_since} day(s):
+
+  ${evidence_list}
+
+  Please log in to your Goldline GRC portal to review and update these evidences: [Go to Goldline GRC](${ciso_assistant_url})
+
+  Thank you.

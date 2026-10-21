@@ -1,0 +1,11 @@
+subject: "Goldline GRC: Dérogation de sécurité expirée depuis ${expired_since} jour(s)"
+body: |
+  Bonjour,
+
+  Vous avez ${exception_count} dérogation(s) de sécurité expirée(s) depuis ${expired_since} jour(s) :
+
+  ${exception_list}
+
+  Connectez-vous à votre portail Goldline GRC pour consulter et mettre à jour ces dérogations de sécurité : [Accéder à Goldline GRC](${ciso_assistant_url})
+
+  Merci.

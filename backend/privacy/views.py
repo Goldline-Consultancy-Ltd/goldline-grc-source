@@ -1,0 +1,882 @@
+import io
+import re
+import uuid
+
+import pandas as pd
+
+from core.constants import COUNTRY_CHOICES
+from core.models import Actor, Terminology, ValidationFlow
+from core.serializers import ActorReadSerializer
+from core.views import (
+    BaseModelViewSet as AbstractBaseModelViewSet,
+    ExportMixin,
+    actor_prefetch,
+    escape_excel_formula,
+)
+from django_filters.rest_framework import DjangoFilterBackend
+from django.http import HttpResponse
+from rest_framework import status
+from rest_framework.decorators import action
+from rest_framework.response import Response
+from django.db.models import Count, Prefetch
+from itertools import chain
+from collections import defaultdict
+
+from core.utils import camel_case
+from iam.models import Folder, RoleAssignment
+
+from .models import (
+    Purpose,
+    PersonalData,
+    DataSubject,
+    DataRecipient,
+    DataContractor,
+    DataTransfer,
+    Processing,
+    RightRequest,
+    DataBreach,
+    ART6_LAWFUL_BASIS_CHOICES,
+    ART9_SPECIAL_CATEGORY_CONDITION_CHOICES,
+    TRANSFER_MECHANISM_CHOICES,
+)
+
+EU_COUNTRIES_SET = {
+    "AT",
+    "BE",
+    "BG",
+    "HR",
+    "CY",
+    "CZ",
+    "DK",
+    "EE",
+    "FI",
+    "FR",
+    "DE",
+    "GR",
+    "HU",
+    "IE",
+    "IT",
+    "LV",
+    "LT",
+    "LU",
+    "MT",
+    "NL",
+    "PL",
+    "PT",
+    "RO",
+    "SK",
+    "SI",
+    "ES",
+    "SE",
+}
+
+
+class BaseModelViewSet(AbstractBaseModelViewSet):
+    serializers_module = "privacy.serializers"
+
+
+class PurposeViewSet(BaseModelViewSet):
+    """
+    API endpoint that allows purposes to be viewed or edited.
+    """
+
+    model = Purpose
+    filterset_fields = ["processing", "legal_basis", "article_9_condition"]
+
+    @action(detail=False, name="Get legal basis choices")
+    def legal_basis(self, request):
+        return Response(dict(ART6_LAWFUL_BASIS_CHOICES))
+
+    @action(detail=False, name="Get article 9 condition choices")
+    def article_9_condition(self, request):
+        return Response(dict(ART9_SPECIAL_CATEGORY_CONDITION_CHOICES))
+
+
+class PersonalDataViewSet(BaseModelViewSet):
+    """
+    API endpoint that allows personal data to be viewed or edited.
+    """
+
+    model = PersonalData
+    filterset_fields = ["processing", "category", "assets"]
+
+    @action(detail=False, name="Get deletion policy choices")
+    def deletion_policy(self, request):
+        return Response(dict(PersonalData.DELETION_POLICY_CHOICES))
+
+    @action(detail=False, name="Get is_sensitive choices")
+    def is_sensitive(self, request):
+        return Response({"true": "Yes", "false": "No"})
+
+    @action(detail=False, methods=["post"], url_path="batch-create")
+    def batch_create(self, request):
+        """
+        Batch create multiple personal data entries for a processing.
+        Expected format:
+        {
+            "processing": "uuid",
+            "categories": ["privacy_name", "privacy_email", ...],
+            "retention": "2 years",
+            "deletion_policy": "privacy_automatic_deletion",
+            "is_sensitive": false
+        }
+        """
+        processing_id = request.data.get("processing")
+        categories = request.data.get("categories", [])
+        retention = request.data.get("retention", "")
+        deletion_policy = request.data.get("deletion_policy", "")
+        is_sensitive = request.data.get("is_sensitive", False)
+
+        if not processing_id:
+            return Response(
+                {"error": "processing is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not isinstance(categories, list) or not categories:
+            return Response(
+                {"error": "categories is required and must be a non-empty list"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Deduplicate while preserving order
+        categories = list(dict.fromkeys(categories))
+
+        try:
+            processing_uuid = uuid.UUID(str(processing_id))
+        except ValueError, AttributeError:
+            return Response(
+                {"error": "Invalid processing ID"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        viewable_ids = RoleAssignment.get_viewable_object_ids(request.user, Processing)
+        try:
+            processing = Processing.objects.filter(id__in=viewable_ids).get(
+                id=processing_uuid
+            )
+        except Processing.DoesNotExist:
+            return Response(
+                {"error": "Processing not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        category_terms = {
+            str(t.id): t
+            for t in Terminology.objects.filter(
+                field_path=Terminology.FieldPath.PERSONAL_DATA_CATEGORY,
+                is_visible=True,
+            )
+        }
+        valid_deletion_policies = {c[0] for c in PersonalData.DELETION_POLICY_CHOICES}
+
+        if deletion_policy and deletion_policy not in valid_deletion_policies:
+            return Response(
+                {"error": f"Invalid deletion_policy: {deletion_policy}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        existing_categories = {
+            str(c)
+            for c in PersonalData.objects.filter(processing=processing).values_list(
+                "category", flat=True
+            )
+        }
+
+        created_items = []
+        skipped_items = []
+        errors = []
+
+        for category in categories:
+            category = str(category)
+            term = category_terms.get(category)
+            if term is None:
+                errors.append({"category": category, "error": "Invalid category"})
+                continue
+
+            if category in existing_categories:
+                existing = PersonalData.objects.filter(
+                    processing=processing, category=term
+                ).first()
+                if existing:
+                    skipped_items.append(
+                        {
+                            "id": str(existing.id),
+                            "category": str(existing.category),
+                            "name": str(existing),
+                        }
+                    )
+                continue
+
+            pd = PersonalData.objects.create(
+                processing=processing,
+                category=term,
+                retention=retention,
+                deletion_policy=deletion_policy,
+                is_sensitive=is_sensitive,
+            )
+            created_items.append(
+                {
+                    "id": str(pd.id),
+                    "category": str(pd.category),
+                    "name": str(pd),
+                }
+            )
+
+        return Response(
+            {
+                "success": True,
+                "created": len(created_items),
+                "skipped": len(skipped_items),
+                "personal_data": created_items,
+                "skipped_personal_data": skipped_items,
+                "errors": errors,
+            },
+            status=status.HTTP_201_CREATED if created_items else status.HTTP_200_OK,
+        )
+
+
+class DataSubjectViewSet(BaseModelViewSet):
+    """
+    API endpoint that allows data subjects to be viewed or edited.
+    """
+
+    model = DataSubject
+    filterset_fields = ["processing"]
+
+    @action(detail=False, name="Get category choices")
+    def category(self, request):
+        return Response(dict(DataSubject.CATEGORY_CHOICES))
+
+
+class DataRecipientViewSet(BaseModelViewSet):
+    """
+    API endpoint that allows data recipients to be viewed or edited.
+    """
+
+    model = DataRecipient
+    filterset_fields = ["processing"]
+
+    @action(detail=False, name="Get category choices")
+    def category(self, request):
+        return Response(dict(DataRecipient.CATEGORY_CHOICES))
+
+
+class DataContractorViewSet(BaseModelViewSet):
+    """
+    API endpoint that allows data contractors to be viewed or edited.
+    """
+
+    model = DataContractor
+    filterset_fields = ["processing"]
+
+    @action(detail=False, name="Get category choices")
+    def relationship_type(self, request):
+        return Response(dict(DataContractor.RELATIONSHIP_TYPE_CHOICES))
+
+    # this should be cached
+    @action(detail=False, name="Get countries list")
+    def country(self, request):
+        return Response(dict(COUNTRY_CHOICES))
+
+
+class DataTransferViewSet(BaseModelViewSet):
+    """
+    API endpoint that allows data transfers to be viewed or edited.
+    """
+
+    model = DataTransfer
+    filterset_fields = ["processing", "transfer_mechanism"]
+
+    # this should be cached
+    @action(detail=False, name="Get countries list")
+    def country(self, request):
+        return Response(dict(COUNTRY_CHOICES))
+
+    @action(detail=False, name="Get transfer mechanism choices")
+    def transfer_mechanism(self, request):
+        return Response(dict(TRANSFER_MECHANISM_CHOICES))
+
+
+def agg_countries(viewable_data_transfers, viewable_data_contractors):
+    transfer_countries = (
+        DataTransfer.objects.filter(id__in=viewable_data_transfers)
+        .values("country")
+        .annotate(count=Count("id"))
+    )
+    contractor_countries = (
+        DataContractor.objects.filter(id__in=viewable_data_contractors)
+        .values("country")
+        .annotate(count=Count("id"))
+    )
+    country_counts = defaultdict(int)
+    for item in chain(transfer_countries, contractor_countries):
+        country_counts[item["country"]] += item["count"]
+
+    # if country code is in EU (GDPR scope) set the dict color to #A7CC74 otherwise to #F4B83D
+    countries = [
+        {
+            "id": country,
+            "count": count,
+            "color": "#A7CC74" if country in EU_COUNTRIES_SET else "#F4B83D",
+        }
+        for country, count in country_counts.items()
+    ]
+
+    return countries
+
+
+class ProcessingViewSet(ExportMixin, BaseModelViewSet):
+    model = Processing
+
+    filterset_fields = [
+        "folder",
+        "nature",
+        "status",
+        "filtering_labels",
+        "assigned_to",
+        "perimeters",
+        "personal_data__category",
+        "data_subjects__category",
+    ]
+
+    def get_queryset(self):
+        return (
+            super()
+            .get_queryset()
+            .select_related("folder")
+            .prefetch_related(
+                "personal_data__category",
+                "data_subjects",
+                "nature",
+                "associated_controls",
+                actor_prefetch("assigned_to"),
+                "evidences",
+                "purposes",
+                "perimeters",
+                Prefetch(
+                    "validationflow_set",
+                    queryset=ValidationFlow.objects.select_related("approver"),
+                ),
+            )
+        )
+
+    export_config = {
+        "fields": {
+            "internal_id": {"source": "id", "label": "internal_id"},
+            "ref_id": {"source": "ref_id", "label": "ref_id", "escape": True},
+            "name": {"source": "name", "label": "name", "escape": True},
+            "description": {
+                "source": "description",
+                "label": "description",
+                "escape": True,
+            },
+            "status": {"source": "get_status_display", "label": "status"},
+            "nature": {
+                "source": "nature",
+                "label": "processing_nature",
+                "format": lambda qs: ",".join(
+                    escape_excel_formula(str(n)) for n in qs.all()
+                ),
+            },
+            "folder": {"source": "folder.name", "label": "folder", "escape": True},
+            "assigned_to": {
+                "source": "assigned_to",
+                "label": "assigned_to",
+                "format": lambda qs: ",".join(
+                    escape_excel_formula(str(actor)) for actor in qs.all()
+                ),
+            },
+            "labels": {
+                "source": "filtering_labels",
+                "label": "labels",
+                "format": lambda qs: ",".join(
+                    escape_excel_formula(o.label) for o in qs.all()
+                ),
+            },
+            "dpia_required": {"source": "dpia_required", "label": "dpia_required"},
+            "dpia_reference": {
+                "source": "dpia_reference",
+                "label": "dpia_reference",
+                "escape": True,
+            },
+        },
+        "filename": "processings_export",
+        "select_related": ["folder"],
+        "prefetch_related": ["filtering_labels", "nature", "assigned_to"],
+    }
+
+    @action(
+        detail=True,
+        methods=["get"],
+        url_path="export-xlsx",
+        name="Export processing as XLSX",
+    )
+    def export_record_xlsx(self, request, pk):
+        processing = self.get_object()
+
+        def txt(value):
+            return escape_excel_formula(value) if isinstance(value, str) else value
+
+        processing_rows = [
+            {
+                "ref_id": txt(processing.ref_id),
+                "name": txt(processing.name),
+                "description": txt(processing.description or ""),
+                "domain": txt(processing.folder.name),
+                "status": processing.status,
+                "processing_nature": ",".join(
+                    txt(n.name) for n in processing.nature.all()
+                ),
+                "information_channel": txt(processing.information_channel),
+                "usage_channel": txt(processing.usage_channel),
+                "dpia_required": processing.dpia_required,
+                "dpia_reference": txt(processing.dpia_reference),
+                "assigned_to": ",".join(
+                    txt(a.user.email if a.user else str(a))
+                    for a in processing.assigned_to.all()
+                ),
+                "labels": ",".join(
+                    txt(label.label) for label in processing.filtering_labels.all()
+                ),
+            }
+        ]
+
+        sheets = [
+            ("Processing", list(processing_rows[0].keys()), processing_rows),
+            (
+                "Purposes",
+                ["name", "description", "legal_basis", "article_9_condition"],
+                [
+                    {
+                        "name": txt(purpose.name or ""),
+                        "description": txt(purpose.description or ""),
+                        "legal_basis": purpose.legal_basis,
+                        "article_9_condition": purpose.article_9_condition or "",
+                    }
+                    for purpose in processing.purposes.all()
+                ],
+            ),
+            (
+                "Personal data",
+                [
+                    "name",
+                    "description",
+                    "category",
+                    "retention",
+                    "deletion_policy",
+                    "is_sensitive",
+                    "assets",
+                ],
+                [
+                    {
+                        "name": txt(item.name or ""),
+                        "description": txt(item.description or ""),
+                        "category": txt(item.category.name),
+                        "retention": txt(item.retention),
+                        "deletion_policy": item.deletion_policy,
+                        "is_sensitive": item.is_sensitive,
+                        "assets": ",".join(
+                            txt(asset.name) for asset in item.assets.all()
+                        ),
+                    }
+                    for item in processing.personal_data.select_related(
+                        "category"
+                    ).prefetch_related("assets")
+                ],
+            ),
+            (
+                "Data subjects",
+                ["name", "description", "category"],
+                [
+                    {
+                        "name": txt(subject.name or ""),
+                        "description": txt(subject.description or ""),
+                        "category": subject.category,
+                    }
+                    for subject in processing.data_subjects.all()
+                ],
+            ),
+            (
+                "Data recipients",
+                ["name", "description", "category"],
+                [
+                    {
+                        "name": txt(recipient.name or ""),
+                        "description": txt(recipient.description or ""),
+                        "category": recipient.category,
+                    }
+                    for recipient in processing.data_recipients.all()
+                ],
+            ),
+            (
+                "Contractors",
+                [
+                    "name",
+                    "description",
+                    "entity",
+                    "relationship_type",
+                    "country",
+                    "documentation_link",
+                ],
+                [
+                    {
+                        "name": txt(contractor.name or ""),
+                        "description": txt(contractor.description or ""),
+                        "entity": txt(contractor.entity.name)
+                        if contractor.entity
+                        else "",
+                        "relationship_type": contractor.relationship_type,
+                        "country": contractor.country,
+                        "documentation_link": txt(contractor.documentation_link),
+                    }
+                    for contractor in processing.contractors_involved.select_related(
+                        "entity"
+                    )
+                ],
+            ),
+            (
+                "Transfers",
+                [
+                    "name",
+                    "description",
+                    "entity",
+                    "country",
+                    "transfer_mechanism",
+                    "guarantees",
+                    "documentation_link",
+                ],
+                [
+                    {
+                        "name": txt(transfer.name or ""),
+                        "description": txt(transfer.description or ""),
+                        "entity": txt(transfer.entity.name) if transfer.entity else "",
+                        "country": transfer.country,
+                        "transfer_mechanism": transfer.transfer_mechanism,
+                        "guarantees": txt(transfer.guarantees),
+                        "documentation_link": txt(transfer.documentation_link),
+                    }
+                    for transfer in processing.data_transfers.select_related("entity")
+                ],
+            ),
+        ]
+
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            for sheet_name, columns, rows in sheets:
+                pd.DataFrame(rows, columns=columns).to_excel(
+                    writer, sheet_name=sheet_name, index=False
+                )
+        buffer.seek(0)
+
+        slug = re.sub(
+            r"[^A-Za-z0-9_-]+", "-", processing.ref_id or processing.name
+        ).strip("-")[:60] or str(processing.id)
+        response = HttpResponse(
+            buffer.getvalue(),
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        response["Content-Disposition"] = (
+            f'attachment; filename="processing-{slug}.xlsx"'
+        )
+        return response
+
+    @action(detail=False, name="Get status choices")
+    def status(self, request):
+        return Response(dict(Processing.STATUS_CHOICES))
+
+    @action(detail=False, name="Get all processing assigned_to actors")
+    def assigned_to(self, request):
+        return Response(
+            ActorReadSerializer(
+                Actor.objects.filter(assigned_processings__isnull=False).distinct(),
+                many=True,
+            ).data
+        )
+
+    @action(detail=False, name="processing metrics")
+    def metrics(self, request, pk=None):
+        return Response({})
+
+    @action(detail=False, name="aggregated metrics")
+    def agg_metrics(self, request):
+        viewable_processings = RoleAssignment.get_viewable_object_ids(
+            request.user, Processing
+        )
+        viewable_data_contractors = RoleAssignment.get_viewable_object_ids(
+            request.user, DataContractor
+        )
+        viewable_data_transfers = RoleAssignment.get_viewable_object_ids(
+            request.user, DataTransfer
+        )
+        viewable_right_requests = RoleAssignment.get_viewable_object_ids(
+            request.user, RightRequest
+        )
+        viewable_data_breaches = RoleAssignment.get_viewable_object_ids(
+            request.user, DataBreach
+        )
+        viewable_personal_data = RoleAssignment.get_viewable_object_ids(
+            request.user, PersonalData
+        )
+        viewable_data_recipients = RoleAssignment.get_viewable_object_ids(
+            request.user, DataRecipient
+        )
+
+        processings_count = len(viewable_processings)
+
+        pd_categories = PersonalData.get_categories_count(
+            filters={"id__in": viewable_personal_data}
+        )
+        total_categories = len(pd_categories)
+        # Recipients count was previously the sum of distinct entities from data contractors and data transfers
+        # contractor_entities = (
+        #     DataContractor.objects.filter(
+        #         id__in=viewable_data_contractors, entity__isnull=False
+        #     )
+        #     .values_list("entity", flat=True)
+        #     .distinct()
+        # )
+        # transfer_entities = (
+        #     DataTransfer.objects.filter(
+        #         id__in=viewable_data_transfers, entity__isnull=False
+        #     )
+        #     .values_list("entity", flat=True)
+        #     .distinct()
+        # )
+        recipients_count = len(viewable_data_recipients)
+
+        open_right_requests_count = (
+            RightRequest.objects.filter(id__in=viewable_right_requests)
+            .exclude(status="done")
+            .count()
+        )
+        open_data_breaches_count = (
+            DataBreach.objects.filter(id__in=viewable_data_breaches)
+            .exclude(status="privacy_closed")
+            .count()
+        )
+
+        # Aggregate data breaches by breach type
+        breach_type_labels = dict(DataBreach.BREACH_TYPE_CHOICES)
+        breach_types = (
+            DataBreach.objects.filter(id__in=viewable_data_breaches)
+            .values("breach_type")
+            .annotate(count=Count("id"))
+        )
+        breach_type_data = [
+            {
+                "name": breach_type_labels.get(
+                    item["breach_type"], item["breach_type"]
+                ),
+                "localName": camel_case(item["breach_type"]),
+                "value": item["count"],
+            }
+            for item in breach_types
+        ]
+
+        # Aggregate right requests by request type
+        request_type_labels = dict(RightRequest.REQUEST_TYPE_CHOICES)
+        request_types = (
+            RightRequest.objects.filter(id__in=viewable_right_requests)
+            .values("request_type")
+            .annotate(count=Count("id"))
+        )
+        request_type_data = [
+            {
+                "name": request_type_labels.get(
+                    item["request_type"], item["request_type"]
+                ),
+                "localName": camel_case(item["request_type"]),
+                "value": item["count"],
+            }
+            for item in request_types
+        ]
+
+        # Build Sankey diagram data: Personal Data → Processing → Legal Basis
+        sankey_nodes = []
+        sankey_links = []
+        node_indices = {}  # Map node names to indices
+
+        # Get all personal data with their processings and legal bases
+        personal_data = (
+            PersonalData.objects.select_related("processing", "category")
+            .prefetch_related("processing__purposes", "processing__data_transfers")
+            .filter(id__in=viewable_personal_data)
+        )
+
+        for pd in personal_data:
+            pd_category = pd.category.name
+            processing_name = (
+                pd.processing.name if pd.processing else "Unknown Processing"
+            )
+
+            # Add personal data category node (depth 0)
+            pd_key = f"pd_{pd_category}"
+            if pd_key not in node_indices:
+                node_indices[pd_key] = len(sankey_nodes)
+                sankey_nodes.append({"name": pd_category, "depth": 0})
+
+            # Add processing node (depth 1)
+            proc_key = f"proc_{processing_name}"
+            if proc_key not in node_indices:
+                node_indices[proc_key] = len(sankey_nodes)
+                sankey_nodes.append(
+                    {"name": f"Processing: {processing_name}", "depth": 1}
+                )
+
+            # Link personal data to processing
+            existing_link = next(
+                (
+                    l
+                    for l in sankey_links
+                    if l["source"] == node_indices[pd_key]
+                    and l["target"] == node_indices[proc_key]
+                ),
+                None,
+            )
+            if existing_link:
+                existing_link["value"] += 1
+            else:
+                sankey_links.append(
+                    {
+                        "source": node_indices[pd_key],
+                        "target": node_indices[proc_key],
+                        "value": 1,
+                    }
+                )
+
+            # Get legal bases from purposes (Art. 6 legal bases only)
+            legal_bases = set()
+            if pd.processing:
+                for purpose in pd.processing.purposes.all():
+                    if purpose.legal_basis:
+                        legal_bases.add(purpose.legal_basis)
+
+            # Link processing to legal bases (depth 2)
+            for legal_basis in legal_bases:
+                legal_key = f"legal_{legal_basis}"
+                if legal_key not in node_indices:
+                    node_indices[legal_key] = len(sankey_nodes)
+                    sankey_nodes.append(
+                        {"name": f"LegalBasis: {legal_basis}", "depth": 2}
+                    )
+
+                existing_link = next(
+                    (
+                        l
+                        for l in sankey_links
+                        if l["source"] == node_indices[proc_key]
+                        and l["target"] == node_indices[legal_key]
+                    ),
+                    None,
+                )
+                if existing_link:
+                    existing_link["value"] += 1
+                else:
+                    sankey_links.append(
+                        {
+                            "source": node_indices[proc_key],
+                            "target": node_indices[legal_key],
+                            "value": 1,
+                        }
+                    )
+
+        return Response(
+            {
+                "countries": agg_countries(
+                    viewable_data_transfers, viewable_data_contractors
+                ),
+                "processings_count": processings_count,
+                "recipients_count": recipients_count,
+                "pd_categories": pd_categories,
+                "pd_cat_count": total_categories,
+                "open_right_requests_count": open_right_requests_count,
+                "open_data_breaches_count": open_data_breaches_count,
+                "breach_types": breach_type_data,
+                "request_types": request_type_data,
+                "sankey_nodes": sankey_nodes,
+                "sankey_links": sankey_links,
+            }
+        )
+
+
+class RightRequestViewSet(BaseModelViewSet):
+    """
+    API endpoint that allows right requests to be viewed or edited.
+    """
+
+    model = RightRequest
+    filterset_fields = [
+        "name",
+        "owner",
+        "request_type",
+        "status",
+        "processings",
+        "folder",
+        "due_date",
+    ]
+
+    @action(detail=False, name="Get request type choices")
+    def request_type(self, request):
+        return Response(dict(RightRequest.REQUEST_TYPE_CHOICES))
+
+    @action(detail=False, name="Get status choices")
+    def status(self, request):
+        return Response(dict(RightRequest.STATUS_CHOICES))
+
+    @action(detail=False, name="Get all right request owners")
+    def owner(self, request):
+        return Response(
+            ActorReadSerializer(
+                Actor.objects.filter(assigned_right_requests__isnull=False).distinct(),
+                many=True,
+            ).data
+        )
+
+
+class DataBreachViewSet(BaseModelViewSet):
+    """
+    API endpoint that allows data breaches to be viewed or edited.
+    """
+
+    model = DataBreach
+    filterset_fields = [
+        "name",
+        "folder",
+        "breach_type",
+        "risk_level",
+        "status",
+        "authorities",
+        "affected_processings",
+        "incident",
+        "evidences",
+        "discovered_on",
+        "authority_notified_on",
+    ]
+
+    def get_queryset(self):
+        return (
+            super()
+            .get_queryset()
+            .select_related("folder", "incident")
+            .prefetch_related(
+                "assigned_to",
+                "authorities",
+                "affected_processings",
+                "affected_personal_data",
+                "remediation_measures",
+                "evidences",
+            )
+        )
+
+    @action(detail=False, name="Get breach type choices")
+    def breach_type(self, request):
+        return Response(dict(DataBreach.BREACH_TYPE_CHOICES))
+
+    @action(detail=False, name="Get risk level choices")
+    def risk_level(self, request):
+        return Response(dict(DataBreach.RISK_LEVEL_CHOICES))
+
+    @action(detail=False, name="Get status choices")
+    def status(self, request):
+        return Response(dict(DataBreach.STATUS_CHOICES))

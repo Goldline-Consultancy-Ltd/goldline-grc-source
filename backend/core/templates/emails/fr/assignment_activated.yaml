@@ -1,0 +1,13 @@
+subject: "Goldline GRC : Votre affectation sur '${assessment_name}' a démarré"
+body: |
+  Bonjour,
+
+  Votre affectation sur l'audit suivant a démarré et est prête pour votre contribution :
+
+  - Audit : ${assessment_name}
+  - Référentiel : ${framework_name}
+  - Date d'échéance : ${due_date}
+
+  Veuillez vous connecter à votre portail Goldline GRC pour commencer votre évaluation : [Accéder à Goldline GRC](${ciso_assistant_url}/auditee-dashboard)
+
+  Merci.

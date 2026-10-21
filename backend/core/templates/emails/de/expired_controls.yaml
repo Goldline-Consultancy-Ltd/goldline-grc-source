@@ -1,0 +1,12 @@
+subject: "Goldline GRC: Überfällige Maßnahmen (${control_count})"
+body: |
+  Hallo,
+
+  Folgende Maßnahmen sind überfällig:
+
+  ${control_list}
+
+  Diese Erinnerung endet, sobald die Maßnahme als aktiv markiert oder die ETA aktualisiert wurde.
+  Melden Sie sich in Ihrem Goldline-GRC-Portal an und öffnen Sie „Meine Aufgaben“, um direkt zu Ihren Maßnahmen zu gelangen: [Goldline GRC öffnen](${ciso_assistant_url})
+
+  Vielen Dank.

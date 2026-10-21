@@ -1,0 +1,11 @@
+subject: "Goldline GRC: Freigabefrist in ${days} ${days_unit}"
+body: |
+  Hallo,
+
+  Bei den folgenden Freigabeanträgen endet die Frist in ${days} ${days_unit}. Anzahl: ${validation_count}
+
+  ${validation_list}
+
+  Bitte prüfen und bearbeiten Sie die Anträge vor Ablauf der Frist: [Goldline GRC öffnen](${ciso_assistant_url})
+
+  Vielen Dank.

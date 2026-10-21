@@ -1,0 +1,15 @@
+subject: "Goldline GRC: La dérogation de sécurité '${exception_name}' est maintenant ${new_status}"
+body: |
+  Bonjour,
+
+  Le statut de la dérogation de sécurité suivante a changé :
+
+  - Nom : ${exception_name}
+  - ID : ${exception_ref_id}
+  - Nouveau statut : ${new_status}
+  - Modifié par : ${actor_name}
+  - Domaine : ${folder_name}
+
+  Connectez-vous à votre portail Goldline GRC pour consulter cette dérogation de sécurité : [Accéder à Goldline GRC](${ciso_assistant_url})
+
+  Merci.

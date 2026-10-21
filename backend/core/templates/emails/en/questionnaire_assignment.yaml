@@ -1,0 +1,18 @@
+subject: "Goldline GRC: A questionnaire has been assigned to you"
+body: |
+  <img src="${ciso_assistant_url}/goldline-grc-mark-512.png" alt="Goldline GRC" width="72">
+
+  **Your all-in-one GRC Management Platform**
+
+  Hello,
+
+  You have been assigned to a questionnaire. Click below to proceed:
+
+  [Go to the Questionnaire](${questionnaire_url})
+
+  If you have trouble with the link, copy and paste the following URL in your browser:
+  ${questionnaire_url}
+
+  Sincerely,
+  Goldline GRC
+  Goldline Consultancy · grc@goldlineconsultancy.co.uk · goldlineconsultancy.co.uk

@@ -1,0 +1,651 @@
+import json
+
+import jsonschema
+from django.contrib.contenttypes.models import ContentType
+from django.utils.translation import gettext_lazy as _
+import structlog
+from rest_framework import serializers
+
+from core.models import OrganisationObjective
+from core.serializers import BaseModelSerializer, ReferentialSerializer
+from core.serializer_fields import FieldsRelatedField, PathField
+from metrology.models import (
+    MetricDefinition,
+    MetricInstance,
+    CustomMetricSample,
+    BuiltinMetricSample,
+    Dashboard,
+    DashboardWidget,
+)
+from metrology.builtin_metrics import get_available_metrics_for_model
+
+logger = structlog.getLogger(__name__)
+
+QUALITATIVE_VALUE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "choice_index": {
+            "type": "integer",
+            "minimum": 1,
+        },
+    },
+    "required": ["choice_index"],
+    "additionalProperties": False,
+}
+
+QUANTITATIVE_VALUE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "result": {
+            "type": "number",
+        },
+    },
+    "required": ["result"],
+    "additionalProperties": False,
+}
+
+VALUE_SCHEMA_BY_CATEGORY = {
+    MetricDefinition.Category.QUALITATIVE: QUALITATIVE_VALUE_SCHEMA,
+    MetricDefinition.Category.QUANTITATIVE: QUANTITATIVE_VALUE_SCHEMA,
+}
+
+
+def coerce_sample_value(value):
+    """Clients before 3.21.5 sent (and stored) the value as a JSON string."""
+    if not isinstance(value, str):
+        return value
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError, TypeError:
+        return value
+    # Only a dict is a legacy encoding; anything else stays a string so the
+    # value schema rejects it instead of slipping past the field's allow_null.
+    return decoded if isinstance(decoded, dict) else value
+
+
+# MetricDefinition serializers
+class MetricDefinitionWriteSerializer(BaseModelSerializer):
+    def validate_choices_definition(self, value):
+        if value is None:
+            return value
+
+        if isinstance(value, list):
+            for choice in value:
+                if not isinstance(choice, dict):
+                    raise serializers.ValidationError(
+                        _("Each choice definition must include a non-empty REF_ID.")
+                    )
+
+                ref_id = choice.get("ref_id")
+                if not isinstance(ref_id, str) or not ref_id.strip():
+                    raise serializers.ValidationError(
+                        _("Each choice definition must include a non-empty REF_ID.")
+                    )
+
+        return value
+
+    class Meta:
+        model = MetricDefinition
+        exclude = ["translations"]
+
+
+class MetricDefinitionReadSerializer(ReferentialSerializer):
+    path = PathField(read_only=True)
+    folder = FieldsRelatedField()
+    library = FieldsRelatedField(["name", "id"])
+    unit = FieldsRelatedField(["name", "id"])
+    filtering_labels = FieldsRelatedField(["id", "folder"], many=True)
+
+    class Meta:
+        model = MetricDefinition
+        exclude = ["translations"]
+
+
+# MetricInstance serializers
+class MetricInstanceWriteSerializer(BaseModelSerializer):
+    organisation_objectives = serializers.PrimaryKeyRelatedField(
+        queryset=OrganisationObjective.objects.all(),
+        many=True,
+        required=False,
+    )
+
+    def update(self, instance, validated_data):
+        # Check if folder is being changed
+        new_folder = validated_data.get("folder")
+        if new_folder and new_folder != instance.folder:
+            # Cascade folder change to all child CustomMetricSamples
+            instance.samples.update(folder=new_folder)
+
+        return super().update(instance, validated_data)
+
+    class Meta:
+        model = MetricInstance
+        fields = "__all__"
+
+
+class MetricInstanceReadSerializer(BaseModelSerializer):
+    path = PathField(read_only=True)
+    folder = FieldsRelatedField()
+    metric_definition = FieldsRelatedField(
+        [
+            "name",
+            "ref_id",
+            "id",
+            "category",
+            {"unit": ["name", "id"]},
+            "choices_definition",
+            "higher_is_better",
+        ]
+    )
+    owner = FieldsRelatedField(many=True)
+    organisation_objectives = FieldsRelatedField(many=True)
+    filtering_labels = FieldsRelatedField(["id", "folder"], many=True)
+    evidences = FieldsRelatedField(["name", "id"])
+    status = serializers.CharField(source="get_status_display", read_only=True)
+    collection_frequency = serializers.CharField(
+        source="get_collection_frequency_display", read_only=True
+    )
+    current_value = serializers.SerializerMethodField()
+    raw_value = serializers.SerializerMethodField()
+    unit = serializers.SerializerMethodField()
+    last_refresh = serializers.DateTimeField(read_only=True)
+
+    class Meta:
+        model = MetricInstance
+        fields = "__all__"
+
+    def get_current_value(self, obj):
+        """Get the current value (formatted with unit) from the latest sample"""
+        return obj.current_value()
+
+    def get_raw_value(self, obj):
+        """Get the raw numeric/index value from the latest sample (without unit)"""
+        return obj.raw_value()
+
+    def get_unit(self, obj):
+        """Get the unit from the metric definition"""
+        if obj.unit:
+            return {
+                "id": str(obj.unit.id),
+                "name": obj.unit.name,
+            }
+        return None
+
+
+# CustomMetricSample serializers
+class CustomMetricSampleWriteSerializer(BaseModelSerializer):
+    def create(self, validated_data):
+        # Set folder from metric_instance before the permission check in parent class
+        if "metric_instance" in validated_data and validated_data["metric_instance"]:
+            validated_data["folder"] = validated_data["metric_instance"].folder
+        return super().create(validated_data)
+
+    def validate_value(self, value):
+        return coerce_sample_value(value)
+
+    def validate_timestamp(self, value):
+        """Prevent creating samples with future timestamps"""
+        from django.utils import timezone
+
+        if value > timezone.now():
+            raise serializers.ValidationError(
+                "Cannot create metric samples with future timestamps."
+            )
+        return value
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+
+        if "value" in attrs:
+            value = attrs["value"]
+        elif self.instance is not None:
+            value = coerce_sample_value(self.instance.value)
+        else:
+            value = CustomMetricSample._meta.get_field("value").get_default()
+        if value is None:
+            return attrs
+
+        metric_instance = attrs.get("metric_instance") or getattr(
+            self.instance, "metric_instance", None
+        )
+        if metric_instance is None:
+            return attrs
+
+        category = metric_instance.metric_definition.category
+        schema = VALUE_SCHEMA_BY_CATEGORY.get(category)
+        if schema is None:
+            return attrs
+
+        try:
+            jsonschema.validate(value, schema)
+        except jsonschema.exceptions.ValidationError as e:
+            raise serializers.ValidationError({"value": e.message})
+
+        if category == MetricDefinition.Category.QUALITATIVE:
+            choice_index = value.get("choice_index")
+            if not isinstance(choice_index, int):
+                raise serializers.ValidationError(
+                    {"value": "choice_index must be an integer, not a float."}
+                )
+
+        return attrs
+
+    class Meta:
+        model = CustomMetricSample
+        exclude = ["folder"]
+
+
+class CustomMetricSampleReadSerializer(BaseModelSerializer):
+    folder = FieldsRelatedField()
+    metric_instance = FieldsRelatedField(
+        ["name", "ref_id", "id", {"evidences": ["id", "name"]}]
+    )
+    evidence_revision = FieldsRelatedField(["id", "name", "version"])
+    display_value = serializers.SerializerMethodField()
+    raw_value = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CustomMetricSample
+        fields = "__all__"
+
+    def get_display_value(self, obj):
+        """Get the human-readable display value (with unit)"""
+        return obj.display_value()
+
+    def get_raw_value(self, obj):
+        """Get the raw numeric/index value (without unit)"""
+        return obj.raw_value()
+
+
+# Dashboard serializers
+class DashboardWriteSerializer(BaseModelSerializer):
+    class Meta:
+        model = Dashboard
+        fields = "__all__"
+
+
+class DashboardReadSerializer(BaseModelSerializer):
+    path = PathField(read_only=True)
+    folder = FieldsRelatedField()
+    filtering_labels = FieldsRelatedField(["id", "folder"], many=True)
+    widget_count = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = Dashboard
+        fields = "__all__"
+
+
+# DashboardWidget serializers
+class DashboardWidgetWriteSerializer(BaseModelSerializer):
+    # Accept model name and convert to ContentType
+    target_model = serializers.CharField(
+        write_only=True, required=False, allow_blank=True, allow_null=True
+    )
+    # Read-only field for edit form to display current model
+    target_content_type_display = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = DashboardWidget
+        fields = "__all__"
+        extra_kwargs = {
+            "target_content_type": {"required": False},
+            "target_object_id": {"required": False},
+            "metric_key": {"required": False},
+            "metric_instance": {"required": False},
+            "text_content": {"required": False},
+        }
+
+    def get_target_content_type_display(self, obj):
+        """Get the content type model name for builtin metrics"""
+        if obj.target_content_type:
+            # Return the actual model class name (PascalCase) to match BUILTIN_METRICS keys
+            model_class = obj.target_content_type.model_class()
+            if model_class:
+                return model_class.__name__
+        return None
+
+    def get_fields(self):
+        fields = super().get_fields()
+        # Ensure target_model is included
+        fields["target_model"] = serializers.CharField(
+            write_only=True, required=False, allow_blank=True, allow_null=True
+        )
+        return fields
+
+    def validate(self, data):
+        """Validate widget grid positioning and convert target_model to target_content_type"""
+        position_x = data.get("position_x", 0)
+        width = data.get("width", 6)
+        height = data.get("height", 2)
+
+        if position_x < 0 or position_x > 11:
+            raise serializers.ValidationError(
+                {"position_x": "Position X must be between 0 and 11"}
+            )
+        if width < 1 or width > 12:
+            raise serializers.ValidationError(
+                {"width": "Width must be between 1 and 12"}
+            )
+        if position_x + width > 12:
+            raise serializers.ValidationError(
+                {"width": "Widget exceeds grid boundary (position_x + width > 12)"}
+            )
+        if height < 1:
+            raise serializers.ValidationError({"height": "Height must be at least 1"})
+
+        # Convert target_model to target_content_type
+        target_model = data.pop("target_model", None)
+        if target_model:  # Only process if not empty/null
+            from django.contrib.contenttypes.models import ContentType
+
+            try:
+                content_type = ContentType.objects.get(model=target_model.lower())
+                data["target_content_type"] = content_type
+            except ContentType.DoesNotExist:
+                raise serializers.ValidationError(
+                    {"target_model": f"Unknown model: {target_model}"}
+                )
+
+        # Clean up empty builtin fields to avoid validation issues
+        # If metric_key is empty string, set to None
+        if data.get("metric_key") == "":
+            data["metric_key"] = None
+        # If target_object_id is empty string, set to None
+        if data.get("target_object_id") == "":
+            data["target_object_id"] = None
+        # If text_content is empty string, set to None
+        if data.get("text_content") == "":
+            data["text_content"] = None
+
+        # For partial updates (PATCH), check existing instance values if not in data
+        instance = getattr(self, "instance", None)
+
+        # Determine chart_type (from data or existing instance)
+        if "chart_type" in data:
+            chart_type = data.get("chart_type")
+        elif instance:
+            chart_type = instance.chart_type
+        else:
+            chart_type = DashboardWidget.ChartType.KPI_CARD
+
+        # Text widgets don't need metric configuration
+        is_text_widget = (
+            chart_type == "text"
+            or chart_type == DashboardWidget.ChartType.TEXT
+            or data.get("text_content")
+        )
+
+        if is_text_widget:
+            # Ensure chart_type is set to 'text'
+            data["chart_type"] = "text"
+            # Text widgets should not have metric fields - clear them if present
+            if data.get("metric_instance") is not None:
+                raise serializers.ValidationError(
+                    {
+                        "metric_instance": "Text widgets should not have a metric instance."
+                    }
+                )
+            if data.get("target_content_type") is not None:
+                raise serializers.ValidationError(
+                    {
+                        "target_content_type": "Text widgets should not have builtin metric fields."
+                    }
+                )
+            return data
+
+        # For non-text widgets: validate metric configuration
+        # Must have either custom or builtin metric
+
+        # Determine metric_instance value (from data or existing instance)
+        if "metric_instance" in data:
+            has_custom = data.get("metric_instance") is not None
+        elif instance:
+            has_custom = instance.metric_instance is not None
+        else:
+            has_custom = False
+
+        # Determine target_content_type value (from data or existing instance)
+        if "target_content_type" in data:
+            has_builtin = data.get("target_content_type") is not None
+        elif instance:
+            has_builtin = instance.target_content_type is not None
+        else:
+            has_builtin = False
+
+        if has_custom and has_builtin:
+            raise serializers.ValidationError(
+                {
+                    "metric_instance": "A widget cannot have both a custom metric instance and builtin metric fields."
+                }
+            )
+
+        if not has_custom and not has_builtin:
+            raise serializers.ValidationError(
+                {
+                    "non_field_errors": "Please select either a custom metric instance or a builtin metric (object type, target object, and metric)."
+                }
+            )
+
+        # If builtin metric, ensure all required fields are present
+        if has_builtin:
+            # Check target_object_id (from data or existing instance)
+            if "target_object_id" in data:
+                has_target_object = bool(data.get("target_object_id"))
+            elif instance:
+                has_target_object = bool(instance.target_object_id)
+            else:
+                has_target_object = False
+
+            if not has_target_object:
+                raise serializers.ValidationError(
+                    {
+                        "target_object_id": "Target object is required for builtin metrics."
+                    }
+                )
+
+            # Check metric_key (from data or existing instance)
+            if "metric_key" in data:
+                has_metric_key = bool(data.get("metric_key"))
+            elif instance:
+                has_metric_key = bool(instance.metric_key)
+            else:
+                has_metric_key = False
+
+            if not has_metric_key:
+                raise serializers.ValidationError(
+                    {"metric_key": "Metric key is required for builtin metrics."}
+                )
+
+        return data
+
+
+class DashboardWidgetReadSerializer(BaseModelSerializer):
+    folder = FieldsRelatedField()
+    dashboard = FieldsRelatedField(["name", "id"])
+    metric_instance = FieldsRelatedField(
+        [
+            "name",
+            "ref_id",
+            "id",
+            "target_value",
+            {
+                "metric_definition": [
+                    "name",
+                    "id",
+                    "category",
+                    {"unit": ["name", "id"]},
+                    "choices_definition",
+                    "higher_is_better",
+                ]
+            },
+        ]
+    )
+    display_title = serializers.CharField(read_only=True)
+    chart_type_display = serializers.CharField(
+        source="get_chart_type_display", read_only=True
+    )
+    time_range_display = serializers.CharField(
+        source="get_time_range_display", read_only=True
+    )
+    aggregation_display = serializers.CharField(
+        source="get_aggregation_display", read_only=True
+    )
+    is_builtin_metric = serializers.BooleanField(read_only=True)
+    is_custom_metric = serializers.BooleanField(read_only=True)
+    is_text_widget = serializers.BooleanField(read_only=True)
+    target_content_type_display = serializers.SerializerMethodField()
+    target_object_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = DashboardWidget
+        fields = "__all__"
+
+    def get_target_content_type_display(self, obj):
+        """Get the content type model name for builtin metrics"""
+        if not obj.target_content_type_id:
+            return None
+        # get_for_id is process-cached, so this never hits the database twice.
+        model_class = ContentType.objects.get_for_id(
+            obj.target_content_type_id
+        ).model_class()
+        return model_class.__name__ if model_class else None
+
+    def _target_name_map(self):
+        """Resolve every widget's generic target in one query per content type.
+
+        The target is a GenericForeignKey, so it cannot be select_related. Fetching
+        it per widget is one query each; on a dashboard where most widgets point at
+        Folders that is the bulk of the request. The whole page is resolved once and
+        cached on the serializer instead.
+        """
+        if not hasattr(self, "_cached_target_names"):
+            widgets = self.instance if self.parent is None else self.parent.instance
+            if widgets is None:
+                widgets = []
+            elif isinstance(widgets, DashboardWidget):
+                widgets = [widgets]
+
+            by_type: dict = {}
+            for widget in widgets:
+                if widget.target_content_type_id and widget.target_object_id:
+                    by_type.setdefault(widget.target_content_type_id, set()).add(
+                        widget.target_object_id
+                    )
+
+            names: dict = {}
+            for content_type_id, object_ids in by_type.items():
+                content_type = ContentType.objects.get_for_id(content_type_id)
+                model_class = content_type.model_class()
+                if model_class is None:
+                    continue
+                for target in model_class.objects.filter(id__in=object_ids):
+                    names[(content_type_id, target.id)] = str(target)
+            self._cached_target_names = names
+        return self._cached_target_names
+
+    def get_target_object_name(self, obj):
+        """Get the name of the target object for builtin metrics"""
+        if not (obj.target_content_type_id and obj.target_object_id):
+            return None
+        return self._target_name_map().get(
+            (obj.target_content_type_id, obj.target_object_id)
+        )
+
+
+# BuiltinMetricSample serializers
+class BuiltinMetricSampleWriteSerializer(BaseModelSerializer):
+    """
+    Write serializer for BuiltinMetricSample.
+    Generally not used directly as samples are system-generated.
+    """
+
+    class Meta:
+        model = BuiltinMetricSample
+        fields = "__all__"
+
+
+class BuiltinMetricSampleReadSerializer(BaseModelSerializer):
+    """Read serializer for BuiltinMetricSample with enriched data."""
+
+    content_type_display = serializers.SerializerMethodField()
+    object_name = serializers.SerializerMethodField()
+    available_metrics = serializers.SerializerMethodField()
+
+    class Meta:
+        model = BuiltinMetricSample
+        fields = [
+            "id",
+            "content_type",
+            "content_type_display",
+            "object_id",
+            "object_name",
+            "date",
+            "metrics",
+            "available_metrics",
+            "created_at",
+            "updated_at",
+        ]
+
+    def _resolved(self):
+        """Per-serializer memo for values shared by many samples.
+
+        A sample carries a content type and a GenericForeignKey target, and
+        neither can be select_related. Resolving them per row costs two queries
+        each, while a history is by definition many samples of the *same* object:
+        for_object returns one object's whole series, so every row resolves the
+        identical pair. The memo is on the serializer, which DRF reuses as
+        `self.child` for every row of a many=True render.
+        """
+        if not hasattr(self, "_resolved_cache"):
+            self._resolved_cache = {}
+        return self._resolved_cache
+
+    def get_content_type_display(self, obj):
+        """Get the human-readable content type name"""
+        # get_for_id is process-cached, so this does not hit the database.
+        return ContentType.objects.get_for_id(obj.content_type_id).model.title()
+
+    def get_object_name(self, obj):
+        """Get the name of the target object"""
+        cache = self._resolved()
+        key = ("name", obj.content_type_id, obj.object_id)
+        if key not in cache:
+            name = None
+            try:
+                model_class = ContentType.objects.get_for_id(
+                    obj.content_type_id
+                ).model_class()
+                if model_class is not None:
+                    target = model_class.objects.filter(id=obj.object_id).first()
+                    name = str(target) if target is not None else None
+            except Exception:
+                logger.warning(
+                    "Could not resolve builtin metric sample target",
+                    sample_id=str(obj.pk),
+                    exc_info=True,
+                )
+            cache[key] = name
+        return cache[key]
+
+    def get_available_metrics(self, obj):
+        """Get the list of available metrics for this object type"""
+        cache = self._resolved()
+        key = ("metrics", obj.content_type_id)
+        if key not in cache:
+            model_class = ContentType.objects.get_for_id(
+                obj.content_type_id
+            ).model_class()
+            metrics = (
+                get_available_metrics_for_model(model_class.__name__)
+                if model_class is not None
+                else {}
+            )
+            cache[key] = {
+                key_name: {
+                    "label": str(meta["label"]),
+                    "type": meta["type"],
+                    "description": str(meta["description"]),
+                }
+                for key_name, meta in metrics.items()
+            }
+        return cache[key]

@@ -1,0 +1,13 @@
+subject: "Goldline GRC: Assignment submitted for '${assessment_name}'"
+body: |
+  Hello,
+
+  An assignment has been submitted for review on the following audit:
+
+  - Audit: ${assessment_name}
+  - Submitted by: ${actor_names}
+  - Requirements assessed: ${requirement_count}
+
+  Please log in to your Goldline GRC portal to review the submission: [Go to Goldline GRC](${ciso_assistant_url})
+
+  Thank you.
