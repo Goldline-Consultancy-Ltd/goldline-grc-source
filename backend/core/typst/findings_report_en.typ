@@ -1,12 +1,49 @@
-// Findings report — English.
+// Findings report, English. Goldline house style (see goldline.typ).
 // Payload: `core.generators.findings_assessment_context` via sys.inputs.data.
+
+#import "goldline.typ": *
 
 #let d = json(bytes(sys.inputs.data))
 #let field(record, key, fallback: "-") = record.at(key, default: fallback)
+#let has(value) = value != none and value != "" and value != "-"
 
-#let accent = rgb("#1e3a8a")
-#let muted = rgb("#6b7280")
-#let rule = rgb("#cbd5e1")
+#let L = (
+  summary: "Summary",
+  details: "Assessment details",
+  reference: "Reference",
+  domain: "Domain",
+  status: "Status",
+  category: "Category",
+  authors: "Authors",
+  reviewers: "Reviewers",
+  date: "Date",
+  description: "Description:",
+  metrics: "Findings at a glance",
+  total: "Total",
+  open: "Open",
+  closed: "Closed",
+  unresolved: "Unresolved important",
+  severity: "Severity",
+  count: "Findings",
+  share: "Share",
+  observation: "Observation",
+  findings: "Findings",
+  covers: "What this covers:",
+  covers-text: n => [#n findings, grouped by severity, with the owner, dates, observation and recommendation.],
+  ref: "Ref",
+  finding: "Finding",
+  owner: "Owner:",
+  priority: "Priority:",
+  eta: "ETA:",
+  due: "Due:",
+  obs: "Observation:",
+  rec: "Recommendation:",
+  controls: "Applied controls:",
+  evidence: "Evidence:",
+  labels: "Labels:",
+  generated: "Generated at:",
+  doc-id: "Document ID:",
+)
 
 #let assessment-status-label = (
   "planned": "Planned",
@@ -25,7 +62,6 @@
   "posture": "Posture follow-up",
   "responsible_disclosure": "Responsible disclosure",
 )
-
 #let severity-label = (
   critical: "Critical",
   high: "High",
@@ -34,17 +70,6 @@
   info: "Info",
   undefined: "Undefined",
 )
-
-// Keyed on the raw value: labels are localised.
-#let severity-fill = (
-  critical: rgb("#fecaca"),
-  high: rgb("#fed7aa"),
-  medium: rgb("#fef3c7"),
-  low: rgb("#dbeafe"),
-  info: rgb("#e0f2fe"),
-  undefined: rgb("#f1f5f9"),
-)
-
 #let status-label = (
   undefined: "Undefined",
   identified: "Identified",
@@ -58,198 +83,123 @@
   closed: "Closed",
 )
 
-#set page(
-  paper: "a4",
-  margin: (x: 2cm, top: 2.2cm, bottom: 2cm),
-  header: context {
-    if counter(page).get().first() > 1 {
-      set text(8pt, fill: muted)
-      grid(columns: (1fr, auto), [Findings report], align(right)[#d.assessment.name])
-      line(length: 100%, stroke: 0.4pt + muted)
-    }
-  },
-  footer: context {
-    set text(8pt, fill: muted)
-    grid(
-      columns: (1fr, auto),
-      d.date, align(right)[#counter(page).display("1 / 1", both: true)],
-    )
-  },
+// Severity fills: low green, medium amber, high and critical pink, else grey.
+#let severity-rating(key) = (
+  critical: "high",
+  high: "high",
+  medium: "medium",
+  low: "low",
+).at(key, default: "not_assessed")
+#let severity-cell(key) = rating-cell(
+  severity-rating(key),
+  label: severity-label.at(key, default: key),
 )
-#set text(10pt, lang: "en")
-#set par(justify: true)
-#show heading.where(level: 1): set text(15pt, fill: accent)
-#show heading.where(level: 2): set text(12pt, fill: accent)
 
-// ---------------------------------------------------------------- cover page
+#let client = if cover != none { cover.at("client", default: "") } else { "" }
+#show: gl-setup.with(title: d.assessment.name, client: client)
 
-#page(header: none, footer: none)[
-  #set par(justify: false)
-  #align(center + horizon)[
-    #text(26pt, weight: "bold", fill: accent)[#d.assessment.name]
-    #v(0.4em)
-    #text(14pt, fill: muted)[Findings report — #category-label.at(d.assessment.category_key, default: d.assessment.category_key)]
-    #if d.assessment.description != "" [
-      #v(0.6em)
-      #block(width: 75%)[#text(9.5pt, fill: muted)[#d.assessment.description]]
-    ]
-    #v(2em)
-    #block(width: 75%)[
-      #set align(left)
-      #set text(10pt)
-      #grid(
-        columns: (auto, 1fr),
-        row-gutter: 8pt,
-        column-gutter: 12pt,
-        [*Reference*], [#d.assessment.ref_id],
-        [*Domain*], [#d.assessment.folder],
-        [*Status*], [#assessment-status-label.at(d.assessment.status_key, default: "-")],
-        [*Authors*], [#d.assessment.authors],
-        [*Reviewers*], [#d.assessment.reviewers],
-        [*Date*], [#d.date],
-      )
-      #v(1em)
-      #block(width: 100%)[
-        #set text(7.5pt, fill: muted)
-        #grid(
-          columns: (auto, 1fr),
-          row-gutter: 3pt,
-          column-gutter: 12pt,
-          [Generated at], [#d.generated_at],
-          [Document ID], [#raw(d.id)],
-        )
-      ]
-    ]
-  ]
-]
+// ------------------------------------------------------------- front matter
+
+#gl-front-matter()
 
 // ------------------------------------------------------------------- summary
 
-= Summary
+= #L.summary
 
-#let m = d.metrics
-#grid(
-  columns: 4,
-  gutter: 1em,
-  ..(
-    ("Total", m.total, rgb("#e8edf7")),
-    ("Open", m.open, rgb("#fee2e2")),
-    ("Closed", m.closed, rgb("#dcfce7")),
-    ("Unresolved important", m.unresolved_important, rgb("#fef3c7")),
-  ).map(((label, value, fill)) => block(
-    fill: fill,
-    radius: 4pt,
-    inset: 10pt,
-    width: 100%,
-  )[
-    #set align(center)
-    #text(8pt, fill: muted)[#label] \
-    #text(18pt, weight: "bold")[#value]
-  ]),
-)
+#gl-details((
+  (L.reference, field(d.assessment, "ref_id")),
+  (L.category, category-label.at(d.assessment.category_key, default: d.assessment.category_key)),
+  (L.domain, field(d.assessment, "folder")),
+  (L.status, assessment-status-label.at(d.assessment.status_key, default: "-")),
+  (L.authors, field(d.assessment, "authors")),
+  (L.reviewers, field(d.assessment, "reviewers")),
+  (L.date, d.date),
+))
 
-#v(1.2em)
-== Severity
-
-#let peak = calc.max(1, ..d.severity_rows.map(r => r.count))
-#for row in d.severity_rows [
-  #grid(
-    columns: (3cm, 1fr, 1.2cm),
-    gutter: 6pt,
-    align(right)[#severity-label.at(row.key)],
-    box(width: 100%, height: 10pt)[
-      #place(
-        left,
-        rect(
-          width: row.count / peak * 100%,
-          height: 10pt,
-          fill: severity-fill.at(row.key),
-          radius: 2pt,
-        ),
-      )
-    ],
-    align(right)[#row.count],
-  )
-  #v(2pt)
+#if has(d.assessment.description) [
+  #gl-label(L.description, d.assessment.description)
 ]
 
-#if d.assessment.observation != "" [
-  #v(0.8em)
-  == Observation
+#let m = d.metrics
+== #L.metrics
+#gl-table(
+  columns: (1fr,) * 4,
+  align: center,
+  header: (L.total, L.open, L.closed, L.unresolved),
+  [#m.total],
+  rating-cell("non_compliant", label: [#m.open]),
+  rating-cell("compliant", label: [#m.closed]),
+  rating-cell("partially_compliant", label: [#m.unresolved_important]),
+)
+
+== #L.severity
+#let peak = calc.max(1, ..d.severity_rows.map(r => r.count))
+#gl-table(
+  columns: (25%, 15%, 1fr),
+  header: (L.severity, L.count, L.share),
+  ..d
+    .severity_rows
+    .map(row => (
+      severity-cell(row.key),
+      align(right)[#row.count],
+      box(width: 100%, height: 8pt)[
+        #if row.count > 0 {
+          place(left + horizon, rect(width: row.count / peak * 100%, height: 8pt, fill: navy))
+        }
+      ],
+    ))
+    .flatten(),
+)
+
+#if has(d.assessment.observation) [
+  == #L.observation
   #d.assessment.observation
 ]
 
 // ------------------------------------------------------------------ findings
 
 #pagebreak(weak: true)
-= Findings
+= #L.findings
+
+#let total-findings = d.groups.map(g => g.findings.len()).sum(default: 0)
+#gl-label(L.covers, (L.covers-text)(total-findings))
+
+#let detail(f) = {
+  let lines = ()
+  if has(field(f, "description", fallback: "")) { lines.push(f.description) }
+  let meta = ()
+  if has(field(f, "owners", fallback: "")) { meta.push(gl-label(L.owner, f.owners)) }
+  if has(field(f, "priority", fallback: "")) { meta.push(gl-label(L.priority, [#f.priority])) }
+  if has(field(f, "eta", fallback: "")) { meta.push(gl-label(L.eta, f.eta)) }
+  if has(field(f, "due_date", fallback: "")) { meta.push(gl-label(L.due, f.due_date)) }
+  if meta.len() > 0 { lines.push(meta.join(h(1em))) }
+  if has(field(f, "observation", fallback: "")) { lines.push(gl-label(L.obs, f.observation)) }
+  if has(field(f, "recommendation", fallback: "")) { lines.push(gl-label(L.rec, f.recommendation)) }
+  let ctl = f.at("controls", default: ())
+  if ctl.len() > 0 { lines.push(gl-label(L.controls, ctl.join(", "))) }
+  let ev = f.at("evidences", default: ())
+  if ev.len() > 0 { lines.push(gl-label(L.evidence, ev.join(", "))) }
+  let lb = f.at("labels", default: ())
+  if lb.len() > 0 { lines.push(gl-label(L.labels, lb.join(", "))) }
+  [#text(fill: dark, weight: "bold")[#f.name]#if lines.len() > 0 [ \ #text(fill: body-grey)[#lines.join(linebreak())]]]
+}
 
 #for group in d.groups [
-  #block(above: 1.2em, below: 0.4em)[
-    #text(12pt, weight: "bold", fill: accent)[
-      #severity-label.at(group.severity_key)
-    ]
-    #text(10pt, fill: muted)[ (#group.findings.len())]
-  ]
-
-  #for finding in group.findings [
-    #block(
-      breakable: true,
-      width: 100%,
-      above: 0.8em,
-      inset: (bottom: 0.6em),
-      stroke: (bottom: 0.4pt + rule),
-    )[
-      #grid(
-        columns: (1fr, auto),
-        gutter: 8pt,
-        text(weight: "bold")[#finding.ref_id — #finding.name],
-        box(
-          fill: severity-fill.at(finding.severity_key),
-          inset: (x: 5pt, y: 2pt),
-          radius: 3pt,
-        )[#text(8pt)[#status-label.at(finding.status_key, default: finding.status_key)]],
-      )
-      #set text(9pt)
-      #v(3pt)
-      // One row each: a wrapped owner list would collide in a shared row.
-      #grid(
-        columns: (2.2cm, 1fr),
-        column-gutter: 6pt,
-        row-gutter: 2pt,
-        text(fill: muted)[Owner], [#finding.owners],
-        text(fill: muted)[Priority], [#finding.priority],
-        text(fill: muted)[ETA / Due], [#finding.eta — #finding.due_date],
-      )
-      #if finding.description != "" [
-        #v(3pt)
-        #text(fill: muted)[#finding.description]
-      ]
-      #if finding.observation != "" [
-        #v(2pt)
-        *Observation:* #finding.observation
-      ]
-      #if finding.recommendation != "" [
-        #v(2pt)
-        *Recommendation:* #finding.recommendation
-      ]
-      #if finding.controls.len() > 0 [
-        #v(2pt)
-        #text(8pt, fill: accent)[Applied controls: #finding.controls.join(", ")]
-      ]
-      #if finding.evidences.len() > 0 [
-        #v(2pt)
-        #text(8pt, fill: accent)[Evidences: #finding.evidences.join(", ")]
-      ]
-      #if finding.labels.len() > 0 [
-        #v(3pt)
-        // One line: a newline here would end the expression.
-        #finding.labels.map(label => box(
-          fill: rgb("#dbeafe"),
-          inset: (x: 5pt, y: 2pt),
-          radius: 3pt,
-        )[#text(7.5pt, fill: rgb("#1e40af"))[#label]]).join(h(3pt))
-      ]
-    ]
-  ]
+  == #severity-label.at(group.severity_key, default: group.severity_key) (#group.findings.len())
+  #gl-table(
+    columns: (11%, 1fr, 15%, 15%),
+    header: (L.ref, L.finding, L.severity, L.status),
+    ..group
+      .findings
+      .map(f => (
+        field(f, "ref_id"),
+        detail(f),
+        severity-cell(f.severity_key),
+        status-label.at(f.status_key, default: f.status_key),
+      ))
+      .flatten(),
+  )
 ]
+
+#v(1.5em)
+#text(8pt)[#gl-label(L.generated, d.generated_at) #h(1em) #gl-label(L.doc-id, d.id)]

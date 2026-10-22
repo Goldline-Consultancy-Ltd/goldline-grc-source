@@ -162,9 +162,9 @@ class TestAuditWordExport:
             f"Expected 200, got {response.status_code}: {_read_streaming(response)[:200]}"
         )
         assert response["Content-Type"] == DOCX_MIME
-        assert (
-            response["Content-Disposition"] == "attachment; filename=exec_report.docx"
-        )
+        # Goldline: the file is named after the audit.
+        assert response["Content-Disposition"].startswith("attachment; filename=")
+        assert response["Content-Disposition"].endswith('_report.docx"')
 
     def test_word_report_body_is_valid_docx(self, admin_client, audit):
         url = reverse(

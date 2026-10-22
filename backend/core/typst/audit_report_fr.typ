@@ -1,166 +1,76 @@
-// Rapport d'audit — français.
+// Rapport d'audit, français. Charte Goldline (voir goldline.typ).
 // Payload: `core.generators.audit_context_for_typst` via sys.inputs.data.
+
+#import "goldline.typ": *
 
 #let d = json(bytes(sys.inputs.data))
 #let field(record, key, fallback: "-") = record.at(key, default: fallback)
 #let shown(key) = key not in d.hidden_fields
 #let chart(name) = if name + ".png" in d.charts { image(name + ".png", width: 100%) }
+#let has(value) = value != none and value != "" and value != "-"
 
-#let accent = rgb("#1e3a8a")
-#let muted = rgb("#6b7280")
-#let result-label = (
-  compliant: "Conforme",
-  partially_compliant: "Partiellement conforme",
-  non_compliant: "Non conforme",
-  not_applicable: "Non applicable",
-  not_assessed: "Non évaluée",
-)
-// Keyed on the raw value: labels are localised.
-#let result-color(key) = (
-  compliant: rgb("#dcfce7"),
-  partially_compliant: rgb("#fef3c7"),
-  non_compliant: rgb("#fee2e2"),
-).at(key, default: rgb("#f1f5f9"))
+#let client = if cover != none { cover.at("client", default: "") } else { "" }
+#show: gl-setup.with(title: d.audit.name, client: client)
 
-#set page(
-  paper: "a4",
-  margin: (x: 2cm, top: 2.2cm, bottom: 2cm),
-  header: context {
-    if counter(page).get().first() > 1 {
-      set text(8pt, fill: muted)
-      grid(
-        columns: (1fr, auto),
-        d.audit.name, align(right)[#d.audit.framework.name],
-      )
-      line(length: 100%, stroke: 0.4pt + muted)
-    }
-  },
-  footer: context {
-    set text(8pt, fill: muted)
-    grid(
-      columns: (1fr, auto),
-      d.date, align(right)[#counter(page).display("1 / 1", both: true)],
-    )
-  },
-)
-#set text(10pt, lang: "fr")
-#set par(justify: true)
-#show heading.where(level: 1): set text(15pt, fill: accent)
-#show heading.where(level: 2): set text(12pt, fill: accent)
-
-// ---------------------------------------------------------------- cover page
+// ------------------------------------------------------------- front matter
 
 #let party = d.at("counterparty", default: none)
-
-#page(header: none, footer: none)[
-  // Ragged: justified metadata hyphenates addresses.
-  #set par(justify: false)
-  #align(center + horizon)[
-    #text(26pt, weight: "bold", fill: accent)[#d.audit.name]
-    #v(0.4em)
-    #text(14pt, fill: muted)[#d.audit.framework.name]
-    #if d.audit.framework.description != "-" [
-      #v(0.4em)
-      #block(width: 75%)[
-        #set text(9.5pt, fill: muted)
-        #set par(justify: false)
-        #align(center)[#d.audit.framework.description]
-      ]
-    ]
-    #v(2em)
-    #block(width: 75%)[
-      #set align(left)
-      #set text(10pt)
-      #if party != none [
-        #grid(
-          columns: (auto, 1fr),
-          row-gutter: 8pt,
-          column-gutter: 12pt,
-          [*Entité évaluée*],
-          [
-            #party.entity#if party.ref_id != "" [ (#party.ref_id)]
-            #if party.address != "" [
-              \ #text(fill: muted)[#party.address.replace("\n", ", ")]
-            ]
-          ],
-          ..if party.legal_identifiers.len() > 0 {
-            (
-              [*Identifiants légaux*],
-              party
-                .legal_identifiers
-                .map(pair => [#pair.label: #pair.value])
-                .join(" · "),
-            )
-          } else { () },
-          ..if party.expiry_date != "-" {
-            ([*Date d'expiration*], [#party.expiry_date])
-          } else { () },
-        )
-        #v(0.6em)
-        #line(length: 100%, stroke: 0.4pt + rgb("#e5e7eb"))
-        #v(0.6em)
-      ]
-      #grid(
-        columns: (auto, 1fr),
-        row-gutter: 8pt,
-        column-gutter: 12pt,
-        [*Référence*], [#field(d.audit, "ref_id")],
-        [*Date*], [#d.date],
-        [*Groupes d'implémentation*], [#if d.igs != "" { d.igs } else { "Tous" }],
-        [*Contributeurs*], [#d.contributors.replace("\n", ", ")],
-      )
-      #v(1em)
-      #block(width: 100%)[
-        #set text(7.5pt, fill: muted)
-        #grid(
-          columns: (auto, 1fr),
-          row-gutter: 3pt,
-          column-gutter: 12pt,
-          [Généré le], [#d.generated_at],
-          [Identifiant du document], [#raw(d.audit.id)],
-        )
-      ]
-    ]
-  ]
-]
+#gl-front-matter()
 
 // ------------------------------------------------------------------- summary
 
 #let r = d.at("req", default: none)
 #let total = if r != none { field(r, "total", fallback: 0) } else { 0 }
 
+= Synthèse
+
+#gl-details((
+  ("Référentiel", d.audit.framework.name),
+  ("Référence", field(d.audit, "ref_id")),
+  ("Groupes d'implémentation", if d.igs != "" { d.igs } else { "Tous" }),
+  ("Contributeurs", d.contributors.replace("\n", ", ")),
+  ..if party != none {
+    (
+      ("Entité évaluée", [#party.entity#if party.ref_id != "" [ (#party.ref_id)]]),
+      ..if party.address != "" { (("Adresse", party.address.replace("\n", ", ")),) } else { () },
+      ..if party.legal_identifiers.len() > 0 {
+        (("Identifiants légaux", party.legal_identifiers.map(p => [#p.label: #p.value]).join("; ")),)
+      } else { () },
+      ..if party.expiry_date != "-" { (("Date d'expiration", party.expiry_date),) } else { () },
+    )
+  } else { () },
+))
+
 #if r != none [
-  = Synthèse managériale
-  #table(
-    columns: 5,
+  == Vue d'ensemble des résultats
+  #gl-table(
+    columns: (1fr,) * 5,
     align: center,
-    stroke: 0.5pt + rgb("#cbd5e1"),
-    fill: (_, y) => if y == 0 { rgb("#e8edf7") },
-    [*Conformes*],
-    [*Partiellement conformes*],
-    [*Non conformes*],
-    [*Non applicables*],
-    [*Non évaluées*],
-    [#r.compliant],
-    [#r.partially_compliant],
-    [#r.non_compliant],
-    [#r.not_applicable],
-    [#r.not_assessed],
+    header: (
+      rating-label("compliant"),
+      rating-label("partially_compliant"),
+      rating-label("non_compliant"),
+      rating-label("not_applicable"),
+      rating-label("not_assessed"),
+    ),
+    rating-cell("compliant", label: [#r.compliant]),
+    rating-cell("partially_compliant", label: [#r.partially_compliant]),
+    rating-cell("non_compliant", label: [#r.non_compliant]),
+    rating-cell("not_applicable", label: [#r.not_applicable]),
+    rating-cell("not_assessed", label: [#r.not_assessed]),
   )
 ]
 #if r != none and total > 0 [
-  #v(0.6em)
-  Compliant on *#calc.round(100 * r.compliant / total, digits: 1)%* of
-  #total assessed requirements. #field(d, "ac_count", fallback: 0) applied
-  controls are linked to this audit.
+  #gl-label("Position globale :")[exigences satisfaites à #str(calc.round(100 * r.compliant / total, digits: 1)).replace(".", ",") % sur #total exigences évaluées. #field(d, "ac_count", fallback: 0) mesures appliquées sont liées à cette évaluation.]
 ]
-  #v(1em)
-  #grid(
-    columns: (1fr, 1fr),
-    gutter: 1em,
-    chart("compliance_donut"), chart("compliance_radar"),
-  )
-#if d.audit.description != "-" [
+#v(0.6em)
+#grid(
+  columns: (1fr, 1fr),
+  gutter: 1em,
+  chart("compliance_donut"), chart("compliance_radar"),
+)
+
+#if has(d.audit.description) [
   == Périmètre
   #d.audit.description
 ]
@@ -168,11 +78,9 @@
 #let drifts = field(d, "drifts_per_domain", fallback: ())
 #if drifts.len() > 0 [
   == Écarts par domaine
-  #table(
+  #gl-table(
     columns: (1fr, auto),
-    stroke: 0.5pt + rgb("#cbd5e1"),
-    fill: (_, y) => if y == 0 { rgb("#e8edf7") },
-    [*Domaine*], [*Constats*],
+    header: ("Domaine", "Écarts"),
     ..drifts.map(x => (field(x, "name"), align(right)[#x.drift_count])).flatten(),
   )
 ]
@@ -183,11 +91,9 @@
 #if shown("score") and categories.len() > 0 [
   = Scores par catégorie
 
-  #table(
+  #gl-table(
     columns: (1fr, auto, auto, auto),
-    stroke: 0.5pt + rgb("#cbd5e1"),
-    fill: (_, y) => if y == 0 { rgb("#e8edf7") },
-    [*Catégorie*], [*Moyenne*], [*Évalués*], [*éléments*],
+    header: ("Catégorie", "Moyenne", "Évalués", "Éléments"),
     ..categories
       .values()
       .map(c => (
@@ -212,14 +118,10 @@
   #chart("chart_controls")
   #v(0.8em)
 
-  #table(
+  #gl-table(
     columns: (1fr, auto, auto),
-    stroke: 0.5pt + rgb("#cbd5e1"),
-    fill: (_, y) => if y == 0 { rgb("#e8edf7") },
-    [*Mesure*], [*Statut*], [*Catégorie*],
-    ..p1
-      .map(c => (field(c, "name"), field(c, "status"), field(c, "category")))
-      .flatten(),
+    header: ("Mesure", "Statut", "Catégorie"),
+    ..p1.map(c => (field(c, "name"), field(c, "status"), field(c, "category"))).flatten(),
   )
 ]
 
@@ -229,95 +131,54 @@
 = Résultats détaillés
 
 #let ras = field(d, "requirement_assessments", fallback: ())
-#text(fill: muted)[#ras.len() exigences évaluables.]
-#v(0.6em)
+#gl-label("Contenu :")[#ras.len() exigences évaluables, avec l'évaluation, les preuves examinées et les mesures liées.]
+#v(0.4em)
 
-#for ra in ras [
-  // Breakable: Typst silently discards overflow from a fixed block.
-  #block(
-    breakable: true,
-    above: 1em,
-    width: 100%,
-    inset: (bottom: 0.7em),
-    stroke: (bottom: 0.4pt + rgb("#e5e7eb")),
-  )[
-    #grid(
-      columns: (1fr, auto),
-      gutter: 8pt,
-      text(weight: "bold")[#field(ra, "ref_id") — #field(ra, "name")],
-      // No badge rather than an empty one.
+#let detail(ra) = {
+  let lines = ()
+  if has(field(ra, "description")) { lines.push(ra.description) }
+  if "status" in ra { lines.push(gl-label("Progression :", ra.status)) }
+  if "extended_result" in ra and has(ra.extended_result) {
+    lines.push(gl-label("Précision du résultat :", ra.extended_result))
+  }
+  if "score" in ra and ra.score != none {
+    lines.push(gl-label("Score :")[#ra.score#if field(ra, "max_score", fallback: none) != none [\/#ra.max_score]])
+  }
+  for qa in ra.at("answers", default: ()) { lines.push(gl-label(qa.question, qa.answer)) }
+  if has(field(ra, "observation")) { lines.push(gl-label("Observation :", ra.observation)) }
+  let tasks = ra.at("task_templates", default: ())
+  if tasks.len() > 0 { lines.push(gl-label("Tâches :", tasks.join(", "))) }
+  let ev = ra.at("evidences", default: ())
+  if ev.len() > 0 { lines.push(gl-label("Preuves :", ev.join(", "))) }
+  if has(field(ra, "applied_controls")) { lines.push(gl-label("Mesures appliquées :", ra.applied_controls)) }
+  [#text(fill: dark, weight: "bold")[#field(ra, "name")]#if lines.len() > 0 [ \ #text(fill: body-grey)[#lines.join(linebreak())]]]
+}
+
+#gl-table(
+  columns: (13%, 1fr, 17%),
+  header: ("Référence ISO", "Exigence et preuves", "Évaluation"),
+  ..ras
+    .map(ra => (
+      field(ra, "ref_id"),
+      detail(ra),
       if "result" in ra {
-        box(
-          fill: result-color(ra.at("result_key", default: "")),
-          inset: (x: 5pt, y: 2pt),
-          radius: 3pt,
-        )[#text(8pt)[#result-label.at(ra.result_key, default: ra.result)]]
-      },
-    )
-    #set text(9pt)
-    #v(3pt)
-    #let meta = (
-      if "status" in ra { ([*Progression:* #ra.status],) } else { () }
-        + if "extended_result" in ra and ra.extended_result != "-" {
-          ([*Précision du résultat:* #ra.extended_result],)
-        } else { () }
-        + if "score" in ra and ra.score != none {
-          ([*Score:* #ra.score#if field(ra, "max_score", fallback: none) != none [
-              \/#ra.max_score
-            ]],)
-        } else { () }
-    )
-    #if meta.len() > 0 [#meta.join(h(10pt))]
+        rating-cell(ra.at("result_key", default: ""), label: rating-label(ra.at("result_key", default: ""), fallback: ra.result))
+      } else { [] },
+    ))
+    .flatten(),
+)
 
-    #if field(ra, "description") != "-" [
-      #v(2pt)
-      #text(fill: muted)[#ra.description]
-    ]
-    #let answers = ra.at("answers", default: ())
-    #if answers.len() > 0 [
-      #v(3pt)
-      #for qa in answers [
-        #text(weight: "semibold")[#qa.question] \
-        #text(fill: rgb("#4338ca"))[#qa.answer]
-        #v(1pt)
-      ]
-    ]
-    #if field(ra, "observation") != "-" [
-      #v(2pt)
-      *"Observation":* #ra.observation
-    ]
-    #let ra-tasks = ra.at("task_templates", default: ())
-    #if ra-tasks.len() > 0 [
-      #v(2pt)
-      #text(8pt, fill: accent)["Tâches": #ra-tasks.join(", ")]
-    ]
-    #let ra-evidences = ra.at("evidences", default: ())
-    #if ra-evidences.len() > 0 [
-      #v(2pt)
-      #text(8pt, fill: accent)["Preuves": #ra-evidences.join(", ")]
-    ]
-    #if field(ra, "applied_controls") != "-" [
-      #v(2pt)
-      #text(8pt, fill: accent)["Mesures appliquées": #ra.applied_controls]
-    ]
-  ]
-]
 // ------------------------------------------------- commitments and tasks
 
-#let undertaking-table(rows) = table(
+#let undertaking-table(rows) = gl-table(
   columns: (1fr, auto, auto, auto),
-  stroke: 0.5pt + rgb("#cbd5e1"),
-  fill: (_, y) => if y == 0 { rgb("#e8edf7") },
-  [*Engagement*],
-  [*Statut*],
-  [*Date d'engagement*],
-  [*Date actuelle*],
+  header: ("Engagement", "Statut", "Date d'engagement", "Date actuelle"),
   ..rows
     .map(row => (
       [
         #field(row, "name")
         #if field(row, "notes", fallback: "") != "" [
-          \ #text(8pt, fill: muted)["Notes": #row.notes]
+          \ #gl-label("Notes :", row.notes)
         ]
       ],
       field(row, "state"),
@@ -325,7 +186,7 @@
       align(right)[
         #field(row, "current_date")
         #if row.at("has_slipped", default: false) [
-          #text(8pt, fill: rgb("#b91c1c"))[("reporté")]
+          #text(fill: rgb("#9C0006"))[(reporté)]
         ]
       ],
     ))
@@ -333,18 +194,19 @@
 )
 
 #let commitments = field(d, "commitments", fallback: ())
-  #pagebreak(weak: true)
-  = Engagements
+#pagebreak(weak: true)
+= Engagements
 
-  #if commitments.len() > 0 [
-    #undertaking-table(commitments)
-  ] else [
-    #text(fill: muted)[Aucun engagement consigné.]
-  ]
+#if commitments.len() > 0 [
+  #undertaking-table(commitments)
+] else [
+  Aucun engagement consigné.
+]
 #let tasks = field(d, "tasks", fallback: ())
 #if tasks.len() > 0 [
   = Tâches
   #undertaking-table(tasks)
 ]
 
-// ------------------------------------------------------------ signatures
+#v(1.5em)
+#text(8pt)[#gl-label("Généré le :", d.generated_at) #h(1em) #gl-label("Identifiant du document :", d.audit.id)]

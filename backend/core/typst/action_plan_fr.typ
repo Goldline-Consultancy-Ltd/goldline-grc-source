@@ -1,12 +1,12 @@
-// Plan d'action — français.
+// Plan d'action, français. Goldline house style (see goldline.typ).
 // Payload: `core.generators.action_plan_context` via sys.inputs.data.
+// Used for both audit and risk assessment action plans.
+
+#import "goldline.typ": *
 
 #let d = json(bytes(sys.inputs.data))
 #let field(record, key, fallback: "-") = record.at(key, default: fallback)
 
-#let accent = rgb("#1e3a8a")
-#let muted = rgb("#6b7280")
-#let rule = rgb("#cbd5e1")
 #let status-label = (
   to_do: "À faire",
   in_progress: "En cours",
@@ -23,109 +23,73 @@
   procedure: "Procédure",
 )
 
-// Landscape: the table needs the width.
-#set page(
-  paper: "a4",
-  flipped: true,
-  margin: (x: 1.6cm, top: 2cm, bottom: 1.6cm),
-  header: context {
-    if counter(page).get().first() > 1 {
-      set text(8pt, fill: muted)
-      grid(columns: (1fr, auto), [Plan d'action], align(right)[#d.subject.name])
-      line(length: 100%, stroke: 0.4pt + muted)
-    }
-  },
-  footer: context {
-    set text(8pt, fill: muted)
-    grid(
-      columns: (1fr, auto),
-      d.date, align(right)[#counter(page).display("1 / 1", both: true)],
-    )
-  },
-)
-#set text(9pt, lang: "fr")
-#show heading.where(level: 1): set text(14pt, fill: accent)
+#let client = if cover != none { cover.at("client", default: "") } else { "" }
+#show: gl-setup.with(title: "Plan d'action : " + d.subject.name, client: client)
 
-= Plan d'action
+// ------------------------------------------------------------- front matter
 
-#block(width: 100%, inset: (bottom: 6pt))[
-  #set text(9pt)
-  #grid(
-    columns: (auto, 1fr),
-    row-gutter: 4pt,
-    column-gutter: 12pt,
-    [*Domaine*], [#d.subject.domain],
-    [*Périmètre*], [#d.subject.perimeter],
-    [*Évaluation*], [#d.subject.name — #d.subject.version],
-    ..if d.subject.framework != "" { ([*Référentiel*], [#d.subject.framework]) } else { () },
-  )
-]
+#gl-front-matter()
 
-#text(fill: muted)[
-  Mesures appliquées associées, regroupées par statut et triées par échéance.
-  #d.total au total.
-]
-#v(0.6em)
+// ------------------------------------------------------------------- summary
+
+= Synthèse
+
+#gl-details((
+  ("Domaine", d.subject.domain),
+  ("Périmètre", d.subject.perimeter),
+  ("Évaluation", [#d.subject.name, version #d.subject.version]),
+  ..if d.subject.framework != "" { (("Référentiel", d.subject.framework),) } else { () },
+  ("Mesures appliquées", [#d.total]),
+))
+
+#gl-label("Périmètre du document :")[les mesures appliquées liées à cette évaluation, regroupées par statut et triées par échéance.]
+
+// ------------------------------------------------------------------ actions
+
+= Actions
+
 // Fractions, not auto: auto columns overflow and overlap.
 #let columns-spec = (
-  2.4fr, // name
-  4.2fr, // description — the column actually read
+  2.3fr, // name
+  3.6fr, // description, the column actually read
   1.4fr, // category
-  2.0fr, // owner
-  1.2fr, // eta
-  3.0fr, // linked items
+  1.8fr, // owner
+  1.4fr, // due date
+  2.8fr, // linked items
 )
 
 #for group in d.groups [
   #block(
     width: 100%,
     fill: rgb(group.fill),
-    inset: 6pt,
-    radius: 3pt,
-    above: 1em,
+    stroke: border-stroke,
+    inset: 5pt,
+    above: 1.2em,
+    below: 0.5em,
+    sticky: true,
   )[
-    #text(weight: "bold")[
+    #text(10pt, weight: "bold", fill: navy)[
       #status-label.at(group.status_key, default: "Sans statut")
       (#group.controls.len())
     ]
   ]
-  #v(4pt)
-  #table(
+  #gl-table(
     columns: columns-spec,
-    stroke: 0.5pt + rule,
-    fill: (_, y) => if y == 0 { rgb("#e8edf7") },
     align: left + top,
-    // Repeats on every page.
-    table.header(
-      [*Nom*],
-      [*Description*],
-      [*Catégorie*],
-      [*Responsable*],
-      [*Échéance*],
-      [*Éléments liés*],
-    ),
+    header: ("Nom", "Description", "Catégorie", "Responsable", "Échéance", "Éléments liés"),
     ..group
       .controls
       .map(c => (
         [#c.name],
-        [#text(8pt)[#c.description]],
+        [#text(8.5pt)[#c.description]],
         [#category-label.at(c.category_key, default: "-")],
         [#c.owner],
         [#c.eta],
-        [#text(8pt)[#if c.linked.len() > 0 { c.linked.join(linebreak()) } else { "-" }]],
+        [#text(8.5pt)[#if c.linked.len() > 0 { c.linked.join(linebreak()) } else { "-" }]],
       ))
       .flatten(),
   )
 ]
 
 #v(1.5em)
-#block(width: 100%)[
-  #set text(7.5pt, fill: muted)
-  #grid(
-    columns: (auto, 1fr),
-    row-gutter: 3pt,
-    column-gutter: 12pt,
-    [Généré le], [#d.generated_at],
-    [Identifiant du document], [#raw(d.id)],
-  )
-]
+#text(8pt)[#gl-label("Généré le :", d.generated_at) #h(1em) #gl-label("Identifiant du document :", d.id)]

@@ -79,6 +79,9 @@ from .generators import (
     gen_audit_context,
     inline_charts_for_docx,
 )
+from .report_brand import cover_for, word_context
+from .report_brand import domain_name as goldline_domain_name
+from .report_brand import footer_text as goldline_footer_text
 from .typst_render import localized_template, render_pdf
 from .serializer_fields import FieldsRelatedField
 
@@ -4682,6 +4685,9 @@ class RiskAssessmentViewSet(XRaysMixin, BaseModelViewSet):
             risk_assessment = self.get_object()
 
             response = HttpResponse(content_type="text/csv; charset=utf-8")
+            response["Content-Disposition"] = (
+                f'attachment; filename="{slugify(risk_assessment.name) or "risk-assessment"}_risk_assessment.csv"'
+            )
             response.write("\ufeff")
 
             writer = csv.writer(response, delimiter=";")
@@ -4947,7 +4953,11 @@ class RiskAssessmentViewSet(XRaysMixin, BaseModelViewSet):
                 ),
             )
             response = HttpResponse(
-                render_pdf(localized_template("risk_report", lang), payload),
+                render_pdf(
+                    localized_template("risk_report", lang),
+                    payload,
+                    cover=cover_for(risk_assessment, "risk_report", lang, payload),
+                ),
                 content_type="application/pdf",
             )
             safe_name = slugify(risk_assessment.name) or "risk-assessment"
@@ -4986,7 +4996,11 @@ class RiskAssessmentViewSet(XRaysMixin, BaseModelViewSet):
                 risk_assessment, applied_controls, lang, linked
             )
             response = HttpResponse(
-                render_pdf(localized_template("action_plan", lang), payload),
+                render_pdf(
+                    localized_template("action_plan", lang),
+                    payload,
+                    cover=cover_for(risk_assessment, "action_plan", lang, payload),
+                ),
                 content_type="application/pdf",
             )
             safe_name = slugify(risk_assessment.name) or "risk-assessment"
@@ -13032,7 +13046,9 @@ class ComplianceAssessmentViewSet(XRaysMixin, BaseModelViewSet):
     @action(detail=True, name="Get compliance assessment (audit) CSV")
     def compliance_assessment_csv(self, request, pk):
         response = HttpResponse(content_type="text/csv; charset=utf-8")
-        response["Content-Disposition"] = 'attachment; filename="audit_export.csv"'
+        response["Content-Disposition"] = (
+            'attachment; filename="compliance_assessment.csv"'
+        )
         response.write("\ufeff")
 
         viewable_objects = RoleAssignment.get_viewable_object_ids(
@@ -13040,6 +13056,11 @@ class ComplianceAssessmentViewSet(XRaysMixin, BaseModelViewSet):
         )
 
         if UUID(pk) in viewable_objects:
+            # Name the file after the audit only once access is confirmed.
+            _csv_audit = ComplianceAssessment.objects.only("name").get(id=pk)
+            response["Content-Disposition"] = (
+                f'attachment; filename="{slugify(_csv_audit.name) or "audit"}_compliance_assessment.csv"'
+            )
             writer = csv.writer(response, delimiter=";")
             columns = [
                 "urn",
@@ -13312,6 +13333,8 @@ class ComplianceAssessmentViewSet(XRaysMixin, BaseModelViewSet):
         filter_graph_by_implementation_groups(tree, implementation_groups)
         annotate_tree_with_aggregated_scores(tree, audit_obj)
         context = gen_audit_context(pk, tree, user_lang)
+        # Goldline: cover fields, brand details and rating fills for the template.
+        context.update(word_context(audit_obj, user_lang, context))
         doc.render(
             inline_charts_for_docx(context, doc), jinja_env=SandboxedEnvironment()
         )
@@ -13323,7 +13346,9 @@ class ComplianceAssessmentViewSet(XRaysMixin, BaseModelViewSet):
             FileWrapper(buffer_doc),
             content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         )
-        response["Content-Disposition"] = "attachment; filename=exec_report.docx"
+        response["Content-Disposition"] = (
+            f'attachment; filename="{slugify(audit_obj.name) or "audit"}_report.docx"'
+        )
 
         return response
 
@@ -13385,6 +13410,9 @@ class ComplianceAssessmentViewSet(XRaysMixin, BaseModelViewSet):
                 localized_template(REPORT_PROFILES[profile]["template"], lang),
                 payload,
                 images=images,
+                cover=cover_for(
+                    audit, REPORT_PROFILES[profile]["template"], lang, payload
+                ),
             ),
             content_type="application/pdf",
         )
@@ -13421,7 +13449,9 @@ class ComplianceAssessmentViewSet(XRaysMixin, BaseModelViewSet):
         )
 
         response = HttpResponse(content_type="text/csv; charset=utf-8")
-        response["Content-Disposition"] = f'attachment; filename="action_plan_{pk}.csv"'
+        response["Content-Disposition"] = (
+            f'attachment; filename="{slugify(compliance_assessment.name) or "audit"}_action_plan.csv"'
+        )
         response.write("\ufeff")
 
         writer = csv.writer(response)
@@ -13620,7 +13650,11 @@ class ComplianceAssessmentViewSet(XRaysMixin, BaseModelViewSet):
             lang = request.user.preferences.get("lang") or "en"
             payload = action_plan_context(audit, applied_controls, lang, linked)
             response = HttpResponse(
-                render_pdf(localized_template("action_plan", lang), payload),
+                render_pdf(
+                    localized_template("action_plan", lang),
+                    payload,
+                    cover=cover_for(audit, "action_plan", lang, payload),
+                ),
                 content_type="application/pdf",
             )
             safe_name = slugify(audit.name) or "audit"
@@ -17067,6 +17101,11 @@ def generate_html(
         "assessments": assessments,
         "ancestors": ancestors,
         "archive_names": archive_names,
+        # Goldline house style: client name and company footer.
+        "goldline": {
+            "client": goldline_domain_name(compliance_assessment),
+            "footer": goldline_footer_text(),
+        },
     }
 
     return render_to_string("core/audit_report.html", data), evidences, archive_names
@@ -17682,7 +17721,13 @@ class FindingsAssessmentViewSet(BaseModelViewSet):
         lang = request.user.preferences.get("lang") or "en"
         payload = findings_assessment_context(findings_assessment, findings, lang)
         response = HttpResponse(
-            render_pdf(localized_template("findings_report", lang), payload),
+            render_pdf(
+                localized_template("findings_report", lang),
+                payload,
+                cover=cover_for(
+                    findings_assessment, "findings_report", lang, payload
+                ),
+            ),
             content_type="application/pdf",
         )
         safe_name = slugify(findings_assessment.name) or "findings_assessment"
@@ -18156,7 +18201,11 @@ class IncidentViewSet(ExportMixin, BaseModelViewSet):
         lang = request.user.preferences.get("lang") or "en"
         payload = incident_context(incident, timeline_entries, lang)
         response = HttpResponse(
-            render_pdf(localized_template("incident_report", lang), payload),
+            render_pdf(
+                localized_template("incident_report", lang),
+                payload,
+                cover=cover_for(incident, "incident_report", lang, payload),
+            ),
             content_type="application/pdf",
         )
         safe_name = slugify(incident.name) or "incident"

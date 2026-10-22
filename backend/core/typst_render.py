@@ -14,9 +14,14 @@ from pathlib import Path
 import structlog
 import typst
 
+from core.report_brand import brand_payload
+
 logger = structlog.get_logger(__name__)
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "typst"
+# Goldline: Carlito (SIL OFL) ships with the backend so PDFs embed it.
+FONT_DIR = Path(__file__).resolve().parent / "fonts" / "carlito"
+BRAND_FILES = ("goldline.typ", "goldline-mark.svg")
 VENDORED_PACKAGES = TEMPLATE_DIR / "packages"
 DEFAULT_LOCALE = "en"
 
@@ -46,6 +51,7 @@ def render_pdf(
     data: dict,
     images: dict[str, bytes] | None = None,
     pdf_standards: list[str] | None = None,
+    cover: dict | None = None,
 ) -> bytes:
     """Compile a Typst template against `data`, returning PDF bytes.
 
@@ -64,6 +70,17 @@ def render_pdf(
             target = root_path / Path(name).name
             target.write_bytes(payload)
 
+        # Goldline house style: shared style file and logo beside the template.
+        for name in BRAND_FILES:
+            (root_path / name).write_bytes((TEMPLATE_DIR / name).read_bytes())
+        lang = template_name.rsplit("_", 1)[-1].removesuffix(".typ")
+        sys_inputs = {
+            "data": json.dumps(data, default=str),
+            "brand": json.dumps(brand_payload(lang if lang in ("en", "fr") else "en")),
+        }
+        if cover is not None:
+            sys_inputs["cover"] = json.dumps(cover, default=str)
+
         packages = root_path / "packages"
         packages.mkdir()
 
@@ -71,7 +88,8 @@ def render_pdf(
             entrypoint,
             root=root_path,
             format="pdf",
-            sys_inputs={"data": json.dumps(data, default=str)},
+            sys_inputs=sys_inputs,
+            font_paths=[str(FONT_DIR)],
             pdf_standards=pdf_standards or [],
             package_path=str(packages),
             package_cache_path=str(packages),

@@ -18,6 +18,13 @@ class CoreConfig(AppConfig):
         # Framework-specific exports register themselves on import
         import core.cyfun  # noqa: F401
 
+        # Goldline GRC: author and company on generated spreadsheets.
+        from core.document_metadata import apply_document_metadata_defaults
+        from core.excel_style import apply_excel_house_style
+
+        apply_document_metadata_defaults()
+        apply_excel_house_style()
+
         # avoid post_migrate handler if we are in the main, as it interferes with restore
         if not os.environ.get("RUN_MAIN"):
             # No sender filter: startup() waits for the last app's

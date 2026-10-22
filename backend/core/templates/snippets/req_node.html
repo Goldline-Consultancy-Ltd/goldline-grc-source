@@ -47,9 +47,9 @@
                   <p class="font-semibold">{{ question.text }}</p>
                   {% with answer=question|get_answers:value %}
                     {% if answer|is_string %}
-                      <span style="color: indigo">{{ answer }}</span>
+                      <span style="color: #0A1628">{{ answer }}</span>
                     {% elif answer|is_list %}
-                      <span style="color: indigo">{{ answer|join:", " }}</span>
+                      <span style="color: #0A1628">{{ answer|join:", " }}</span>
                     {% else %}
                       <span style="color: gray"> {% trans "No answer" %}</span>
                     {% endif %}

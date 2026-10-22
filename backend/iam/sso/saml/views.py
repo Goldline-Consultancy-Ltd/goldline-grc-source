@@ -341,6 +341,6 @@ class DownloadSAMLPublicCertView(SAMLViewMixin, APIView):
 
         response = HttpResponse(cert_pem, content_type="application/x-pem-file")
         response["Content-Disposition"] = (
-            'attachment; filename="ciso-saml-public-cert.pem"'
+            'attachment; filename="goldline-grc-saml-public-cert.pem"'
         )
         return response

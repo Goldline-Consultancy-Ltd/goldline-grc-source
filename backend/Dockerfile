@@ -89,6 +89,12 @@ RUN rm -rf /usr/lib/python3/dist-packages/pip \
 #watch out for local files during dev and maintenance of .dockerignore
 COPY . .
 
+# Goldline GRC: Carlito (SIL OFL, metric-compatible with Calibri) as a system
+# font, so WeasyPrint PDFs use the house font; Typst loads it from core/fonts.
+RUN install -d /usr/share/fonts/truetype/carlito \
+  && cp core/fonts/carlito/*.ttf /usr/share/fonts/truetype/carlito/ \
+  && fc-cache -f /usr/share/fonts/truetype/carlito
+
 # No `passwd` in the DHI base; installing it would pull shadow + PAM into the runtime.
 RUN echo 'app:x:1001:1001::/home/app:/bin/bash' >> /etc/passwd \
   && echo 'app:x:1001:' >> /etc/group \

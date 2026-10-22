@@ -39,7 +39,7 @@ class ExportBackupView(APIView):
         response = HttpResponse(content_type="application/gzip")
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         response["Content-Disposition"] = (
-            f'attachment; filename="ciso-assistant-db-{settings.VERSION}-{timestamp}.json.gz"'
+            f'attachment; filename="goldline-grc-db-{settings.VERSION}-{timestamp}.json.gz"'
         )
 
         buffer = io.StringIO()
