@@ -78,10 +78,10 @@ index 89a6262..753eb3b 100644
          "ar": {"name": "منشئ المستخدمين"},
 diff --git a/backend/iam/goldline_access.py b/backend/iam/goldline_access.py
 new file mode 100644
-index 0000000..602e247
+index 0000000..be913b1
 --- /dev/null
 +++ b/backend/iam/goldline_access.py
-@@ -0,0 +1,75 @@
+@@ -0,0 +1,76 @@
 +"""Goldline (v4.1.1-goldline.4): access checks made at request time.
 +
 +Account expiry. A user whose expiry_date has passed can no longer authenticate: password sign-in fails (the
@@ -89,10 +89,11 @@ index 0000000..602e247
 +from the first day after the expiry date. The nightly deactivate_expired_users task still runs; it is no longer
 +the only safeguard.
 +
-+MFA. When the general setting enforce_mfa is on, a local user who has not set up MFA (not a superuser, not an SSO
-+user: the same rule the screens apply in routes/(app)/+layout.server.ts) can use the API only for what the MFA
-+set-up page needs (MFA_SETUP_PATHS). Every other API request is refused with 403 mfa_setup_required, so a password
-+sign-in can no longer be used for anything until MFA is set up, whether through the screens or the API.
++MFA. When the general setting enforce_mfa is on, a local user who has not set up MFA (not an SSO user) can use the
++API only for what the MFA set-up page needs (MFA_SETUP_PATHS). Unlike the screens (routes/(app)/+layout.server.ts),
++superusers are not exempt: they also need MFA for API use (Director, 19 Nov 2026). Every other API request is
++refused with 403 mfa_setup_required, so a password sign-in can no longer be used for anything until MFA is set up,
++whether through the screens or the API.
 +"""
 +
 +from datetime import date
@@ -128,7 +129,7 @@ index 0000000..602e247
 +        return False
 +    if not general.get("enforce_mfa"):
 +        return False
-+    if user.is_superuser or not user.is_local or user.is_sso:
++    if not user.is_local or user.is_sso:
 +        return False
 +    has_mfa = user.has_mfa_enabled
 +    return not (has_mfa() if callable(has_mfa) else has_mfa)
@@ -159,10 +160,10 @@ index 0000000..602e247
 +        return result
 diff --git a/backend/iam/tests/test_goldline_access.py b/backend/iam/tests/test_goldline_access.py
 new file mode 100644
-index 0000000..8c3cf99
+index 0000000..94a0670
 --- /dev/null
 +++ b/backend/iam/tests/test_goldline_access.py
-@@ -0,0 +1,334 @@
+@@ -0,0 +1,342 @@
 +"""Goldline v4.1.1-goldline.4: request-time expiry, API MFA requirement and the Goldline auditor role.
 +
 +Each test sets up its own users, domains and settings in the test database; nothing here touches a real instance.
@@ -331,9 +332,17 @@ index 0000000..8c3cf99
 +        user = User.objects.create_user(email="not-enforced@tests.com", password=PASSWORD)
 +        assert _token_client(user).get("/api/folders/").status_code == 200
 +
-+    def test_superuser_exempt_as_on_screens(self, app_config):
++    def test_superuser_refused_without_mfa(self, app_config):
 +        _set_enforce_mfa(True)
 +        admin = User.objects.create_superuser("super-no-mfa@tests.com")
++        client = _token_client(admin)
++        assert client.get("/api/folders/").status_code == 403
++        assert client.get("/api/iam/current-user/").status_code == 200
++
++    def test_superuser_allowed_with_mfa(self, app_config):
++        _set_enforce_mfa(True)
++        admin = User.objects.create_superuser("super-with-mfa@tests.com")
++        _give_mfa(admin)
 +        assert _token_client(admin).get("/api/folders/").status_code == 200
 +
 +    def test_expiry_checked_before_mfa(self, app_config):
