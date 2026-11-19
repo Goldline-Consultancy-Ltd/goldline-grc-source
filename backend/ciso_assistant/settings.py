@@ -623,7 +623,8 @@ REST_FRAMEWORK = {
         "rest_framework.renderers.JSONRenderer",
     ],
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "knox.auth.TokenAuthentication",
+        # Goldline (v4.1.1-goldline.4): knox token authentication with request-time access checks
+        "iam.goldline_access.GoldlineTokenAuthentication",
         "iam.authentication.OIDCServiceAccountAuthentication",
     ],
     "DEFAULT_PERMISSION_CLASSES": [
@@ -854,6 +855,9 @@ SOCIALACCOUNT_ADAPTER = "iam.adapter.SocialAccountAdapter"
 
 SOCIALACCOUNT_EMAIL_AUTHENTICATION = True
 SOCIALACCOUNT_EMAIL_AUTHENTICATION_AUTO_CONNECT = True
+
+# Goldline (v4.1.1-goldline.4): the default backend, but an expired user cannot sign in
+AUTHENTICATION_BACKENDS = ["iam.goldline_access.ExpiryAwareModelBackend"]
 
 HEADLESS_ONLY = True
 
