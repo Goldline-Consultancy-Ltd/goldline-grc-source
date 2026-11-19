@@ -5,10 +5,11 @@ authentication backend) and every API request with an existing token is refused 
 from the first day after the expiry date. The nightly deactivate_expired_users task still runs; it is no longer
 the only safeguard.
 
-MFA. When the general setting enforce_mfa is on, a local user who has not set up MFA (not a superuser, not an SSO
-user: the same rule the screens apply in routes/(app)/+layout.server.ts) can use the API only for what the MFA
-set-up page needs (MFA_SETUP_PATHS). Every other API request is refused with 403 mfa_setup_required, so a password
-sign-in can no longer be used for anything until MFA is set up, whether through the screens or the API.
+MFA. When the general setting enforce_mfa is on, a local user who has not set up MFA (not an SSO user) can use the
+API only for what the MFA set-up page needs (MFA_SETUP_PATHS). Unlike the screens (routes/(app)/+layout.server.ts),
+superusers are not exempt: they also need MFA for API use (Director, 19 Nov 2026). Every other API request is
+refused with 403 mfa_setup_required, so a password sign-in can no longer be used for anything until MFA is set up,
+whether through the screens or the API.
 """
 
 from datetime import date
@@ -44,7 +45,7 @@ def mfa_setup_required(user) -> bool:
         return False
     if not general.get("enforce_mfa"):
         return False
-    if user.is_superuser or not user.is_local or user.is_sso:
+    if not user.is_local or user.is_sso:
         return False
     has_mfa = user.has_mfa_enabled
     return not (has_mfa() if callable(has_mfa) else has_mfa)

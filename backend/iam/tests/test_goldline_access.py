@@ -166,9 +166,17 @@ class TestApiMfa:
         user = User.objects.create_user(email="not-enforced@tests.com", password=PASSWORD)
         assert _token_client(user).get("/api/folders/").status_code == 200
 
-    def test_superuser_exempt_as_on_screens(self, app_config):
+    def test_superuser_refused_without_mfa(self, app_config):
         _set_enforce_mfa(True)
         admin = User.objects.create_superuser("super-no-mfa@tests.com")
+        client = _token_client(admin)
+        assert client.get("/api/folders/").status_code == 403
+        assert client.get("/api/iam/current-user/").status_code == 200
+
+    def test_superuser_allowed_with_mfa(self, app_config):
+        _set_enforce_mfa(True)
+        admin = User.objects.create_superuser("super-with-mfa@tests.com")
+        _give_mfa(admin)
         assert _token_client(admin).get("/api/folders/").status_code == 200
 
     def test_expiry_checked_before_mfa(self, app_config):
