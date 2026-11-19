@@ -199,6 +199,8 @@ class RoleCodename(Enum):
     AUDITEE = "BI-RL-ADE"
     TECHNICAL_TESTER = "BI-RL-TST"
     USER_CREATOR = "BI-RL-UCR"
+    # Goldline (v4.1.1-goldline.4): an external auditor's role, see core/startup.py
+    GOLDLINE_AUDITOR = "BI-RL-GLA"
 
     def __str__(self) -> str:
         return self.value
@@ -468,6 +470,10 @@ BUILTIN_ROLE_TRANSLATIONS = {
         "uk": {"name": "Базовий читач"},
         "ur": {"name": "بنیادی ریڈر"},
         "zh": {"name": "基线阅读者"},
+    },
+    # Goldline (v4.1.1-goldline.4): English only; other languages fall back to English
+    "BI-RL-GLA": {
+        "en": {"name": "Goldline auditor"},
     },
     "BI-RL-UCR": {
         "en": {"name": "User creator"},
