@@ -539,7 +539,22 @@ MIDDLEWARE = [
     "core.custom_middleware.AuditlogMiddleware",
     "allauth.account.middleware.AccountMiddleware",
     "core.focus_middleware.FocusModeMiddleware",
+    # Goldline (v4.1.1-goldline.7, FND-254): shared limit on wrong second-factor codes (iam/goldline_mfa_limit.py)
+    "iam.goldline_mfa_limit.MFALimitMiddleware",
 ]
+# Goldline (v4.1.1-goldline.7, FND-254): "default" is Django's own default (per-process memory, unchanged); the
+# second-factor limit counts in a file cache that every worker process of the container shares.
+CACHES = {
+    "default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"},
+    "goldline_ratelimit": {
+        "BACKEND": "django.core.cache.backends.filebased.FileBasedCache",
+        "LOCATION": os.path.join(
+            os.environ.get("TMPDIR", "/tmp"), "goldline-ratelimit"
+        ),
+        "TIMEOUT": 3600,
+        "OPTIONS": {"MAX_ENTRIES": 50000},
+    },
+}
 ROOT_URLCONF = "ciso_assistant.urls"
 # we leave these for the API UI tools - even if Django templates and Admin are not used anymore
 LOGIN_REDIRECT_URL = "/api"
