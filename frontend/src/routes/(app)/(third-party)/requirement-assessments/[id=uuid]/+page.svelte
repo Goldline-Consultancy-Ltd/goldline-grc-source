@@ -116,7 +116,8 @@
 
 <div class="card space-y-2 p-4 bg-surface-50-950 shadow-sm">
 	<div class="flex flex-row space-x-2 items-center">
-		<code>{data.requirement.urn}</code>
+		<!-- Goldline (v4.1.1-goldline.5): the requirement's own reference, not the library's internal identifier -->
+		{#if data.requirement.ref_id}<code>{data.requirement.ref_id}</code>{/if}
 		{#if showStatus}
 			<span
 				class="badge h-fit"
