@@ -4966,7 +4966,9 @@ class RiskAssessmentViewSet(XRaysMixin, BaseModelViewSet):
             )
             return response
         else:
-            return Response({"error": "Permission denied"})
+            return Response(
+                {"error": "Permission denied"}, status=status.HTTP_403_FORBIDDEN
+            )
 
     @action(detail=True, name="Get action plan PDF")
     def action_plan_pdf(self, request, pk):
@@ -5009,7 +5011,9 @@ class RiskAssessmentViewSet(XRaysMixin, BaseModelViewSet):
             )
             return response
         else:
-            return Response({"error": "Permission denied"})
+            return Response(
+                {"error": "Permission denied"}, status=status.HTTP_403_FORBIDDEN
+            )
 
     @action(
         detail=True,
@@ -13674,7 +13678,9 @@ class ComplianceAssessmentViewSet(XRaysMixin, BaseModelViewSet):
             )
             return response
         else:
-            return Response({"error": "Permission denied"})
+            return Response(
+                {"error": "Permission denied"}, status=status.HTTP_403_FORBIDDEN
+            )
 
     @action(
         detail=True,
@@ -14731,7 +14737,9 @@ class ComplianceAssessmentViewSet(XRaysMixin, BaseModelViewSet):
                 raise
 
         else:
-            return Response({"error": "Permission denied"})
+            return Response(
+                {"error": "Permission denied"}, status=status.HTTP_403_FORBIDDEN
+            )
 
     @action(detail=False, methods=["get"])
     def recap(self, request):

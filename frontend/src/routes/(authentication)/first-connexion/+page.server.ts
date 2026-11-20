@@ -1,4 +1,5 @@
 import { BASE_API_URL } from '$lib/utils/constants';
+import { blankSecrets } from '$lib/server/redact-secrets';
 import { safeTranslate } from '$lib/utils/i18n';
 import { ResetPasswordSchema } from '$lib/utils/schemas';
 import { m } from '$paraglide/messages';
@@ -18,7 +19,7 @@ export const actions: Actions = {
 	default: async (event) => {
 		const form = await superValidate(event.request, zod(ResetPasswordSchema));
 		if (!form.valid) {
-			return fail(400, { form });
+			return fail(400, { form: blankSecrets(form) });
 		}
 
 		const endpoint = `${BASE_API_URL}/iam/password-reset/confirm/`;
@@ -30,6 +31,7 @@ export const actions: Actions = {
 		};
 
 		const res = await event.fetch(endpoint, requestInitOptions);
+		blankSecrets(form);
 
 		if (!res.ok) {
 			const response = await res.json();

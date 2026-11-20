@@ -297,12 +297,11 @@ class TestGoldlineAuditorRole:
     def test_cannot_export_outside_folder(self, auditor_setup):
         s = auditor_setup
         client = s["client"]
-        # The upstream assessment export answers 200 with a JSON "Permission denied" body instead of 403; what
-        # matters is that no archive and none of domain B's content comes back.
+        # Since goldline.6 (FND-260) the assessment export answers 403 (upstream answered 200 with the same body).
         resp = client.get(f"/api/compliance-assessments/{s['b']['assessment'].id}/export/")
-        assert resp.status_code in (200, 403, 404)
+        assert resp.status_code == 403
         assert resp.get("Content-Type", "").startswith("application/json"), "an archive was returned"
-        assert resp.json() == {"error": "Permission denied"} or resp.status_code in (403, 404)
+        assert resp.json() == {"error": "Permission denied"}
         assert s["b"]["assessment"].name.encode() not in resp.content
         for path in (
             f"/api/compliance-assessments/{s['b']['assessment'].id}/evidences_zip/",
@@ -386,3 +385,71 @@ class TestGoldlineFive:
         s = auditor_setup
         r = s["client"].get(f"/api/requirement-assessments/{s['b']['requirement'].id}/")
         assert r.status_code == 404  # the screen turns this into a clean 404 (frontend test)
+
+
+@pytest.mark.django_db
+class TestGoldlineSix:
+    """v4.1.1-goldline.6 (FND-260): export-type actions on another domain's record answer 403, not 200."""
+
+    @staticmethod
+    def _risk_assessment_in(domain):
+        from core.models import RiskAssessment, RiskMatrix
+        from test_fixtures import RISK_MATRIX_JSON_DEFINITION
+
+        matrix = RiskMatrix.objects.create(
+            name=f"rm-{domain.name}", json_definition=RISK_MATRIX_JSON_DEFINITION, folder=domain
+        )
+        perimeter = Perimeter.objects.create(name=f"rp-{domain.name}", folder=domain)
+        return RiskAssessment.objects.create(
+            name=f"ra-{domain.name}", perimeter=perimeter, risk_matrix=matrix, folder=domain
+        )
+
+    @staticmethod
+    def _paths(s):
+        ra_a, ra_b = (TestGoldlineSix._risk_assessment_in(s[d]) for d in ("domain_a", "domain_b"))
+        ca_a, ca_b = s["a"]["assessment"], s["b"]["assessment"]
+        own = [
+            (f"/api/compliance-assessments/{ca_a.id}/export/", ca_a.name),
+            (f"/api/compliance-assessments/{ca_a.id}/action_plan_pdf/", ca_a.name),
+            (f"/api/risk-assessments/{ra_a.id}/risk_assessment_pdf/", ra_a.name),
+            (f"/api/risk-assessments/{ra_a.id}/action_plan_pdf/", ra_a.name),
+        ]
+        other = [
+            (f"/api/compliance-assessments/{ca_b.id}/export/", ca_b.name),
+            (f"/api/compliance-assessments/{ca_b.id}/action_plan_pdf/", ca_b.name),
+            (f"/api/risk-assessments/{ra_b.id}/risk_assessment_pdf/", ra_b.name),
+            (f"/api/risk-assessments/{ra_b.id}/action_plan_pdf/", ra_b.name),
+        ]
+        return own, other
+
+    @staticmethod
+    def _body(resp):
+        return b"".join(resp.streaming_content) if getattr(resp, "streaming", False) else resp.content
+
+    def test_other_domain_exports_are_403_with_no_data(self, auditor_setup):
+        s = auditor_setup
+        _, other = self._paths(s)
+        for path, name in other:
+            resp = s["client"].get(path)
+            assert resp.status_code == 403, path
+            assert resp.get("Content-Type", "").startswith("application/json"), path
+            assert resp.json() == {"error": "Permission denied"}, path
+            assert name.encode() not in self._body(resp), path
+
+    def test_other_domain_neighbouring_exports_stay_403_or_404(self, auditor_setup):
+        s = auditor_setup
+        ca_b = s["b"]["assessment"]
+        for action in ("evidences_zip", "word_report", "xlsx", "compliance_assessment_csv", "posture-pdf"):
+            path = f"/api/compliance-assessments/{ca_b.id}/{action}/"
+            resp = s["client"].get(path)
+            assert resp.status_code in (403, 404, 405), (path, resp.status_code)
+            assert ca_b.name.encode() not in self._body(resp), path
+
+    def test_own_domain_exports_still_200(self, auditor_setup):
+        s = auditor_setup
+        own, _ = self._paths(s)
+        for path, _name in own:
+            resp = s["client"].get(path)
+            assert resp.status_code == 200, (path, resp.status_code)
+            assert not resp.get("Content-Type", "").startswith("application/json"), path
+            assert len(self._body(resp)) > 0, path

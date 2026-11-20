@@ -1,4 +1,5 @@
 import { getSecureRedirect } from '$lib/utils/helpers';
+import { blankSecrets } from '$lib/server/redact-secrets';
 
 import { ALLAUTH_API_URL, BASE_API_URL } from '$lib/utils/constants';
 import { logger } from '$lib/server/logger';
@@ -46,11 +47,12 @@ export const actions: Actions = {
 	login: async ({ request, fetch, cookies, url }) => {
 		const form = await superValidate(request, zod(loginSchema));
 		if (!form.valid) {
-			return fail(400, { form });
+			return fail(400, { form: blankSecrets(form) });
 		}
 
 		const email = form.data.username;
 		const password = form.data.password;
+		blankSecrets(form);
 
 		const login: LoginRequestBody = {
 			email,
@@ -130,13 +132,14 @@ export const actions: Actions = {
 		if (!formData) return fail(400, { error: 'No form data' });
 
 		const form = await superValidate(formData, zod(mfaAuthenticateSchema));
-		if (!form.valid) return fail(400, { form });
+		if (!form.valid) return fail(400, { form: blankSecrets(form) });
 
 		const endpoint = `${ALLAUTH_API_URL}/auth/2fa/authenticate`;
 		const requestInitOptions: RequestInit = {
 			method: 'POST',
 			body: JSON.stringify(form.data)
 		};
+		blankSecrets(form);
 
 		const response = await event.fetch(endpoint, requestInitOptions).then((res) => res.json());
 

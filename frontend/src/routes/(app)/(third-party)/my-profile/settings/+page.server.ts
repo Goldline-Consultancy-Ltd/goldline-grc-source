@@ -1,4 +1,5 @@
 import { ALLAUTH_API_URL, BASE_API_URL } from '$lib/utils/constants';
+import { blankSecrets } from '$lib/server/redact-secrets';
 import { error, fail } from '@sveltejs/kit';
 import type { Actions, PageServerLoad } from './$types';
 import { activateTOTPSchema, registerWebAuthnSchema } from '$lib/utils/schemas';
@@ -109,7 +110,7 @@ export const actions: Actions = {
 		if (!formData) return fail(400, { error: 'No form data' });
 
 		const form = await superValidate(formData, zod(activateTOTPSchema));
-		if (!form.valid) return fail(400, { form });
+		if (!form.valid) return fail(400, { form: blankSecrets(form) });
 
 		const endpoint = `${ALLAUTH_API_URL}/account/authenticators/totp`;
 		const requestInitOptions: RequestInit = {
@@ -118,6 +119,7 @@ export const actions: Actions = {
 		};
 
 		const response = await event.fetch(endpoint, requestInitOptions);
+		blankSecrets(form);
 		const data = await response.json();
 
 		if (data.status !== 200) {
