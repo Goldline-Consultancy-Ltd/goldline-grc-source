@@ -1,4 +1,5 @@
 import type { PageServerLoad } from './$types';
+import { error } from '@sveltejs/kit';
 
 import { BASE_API_URL } from '$lib/utils/constants';
 import { type TableSource } from '$lib/components/ModelTable/types';
@@ -9,7 +10,14 @@ import type { urlModel } from '$lib/utils/types';
 export const load = (async ({ fetch, params }) => {
 	const URLModel = 'requirement-assessments';
 	const baseEndpoint = `${BASE_API_URL}/${URLModel}/${params.id}/`;
-	const requirementAssessment = await fetch(baseEndpoint).then((res) => res.json());
+	// Goldline (v4.1.1-goldline.5): a requirement the user may not see (another domain, or no such id) is a clean 404,
+	// never a server error, and nothing of it is read.
+	const requirementResponse = await fetch(baseEndpoint);
+	if (!requirementResponse.ok) {
+		await discardBody(requirementResponse);
+		error(404, 'Not found');
+	}
+	const requirementAssessment = await requirementResponse.json();
 	const complianceAssessmentScore = await fetch(
 		`${BASE_API_URL}/compliance-assessments/${requirementAssessment.compliance_assessment.id}/global_score/`
 	).then((res) => res.json());

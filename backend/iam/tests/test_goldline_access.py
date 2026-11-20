@@ -340,3 +340,49 @@ class TestGoldlineAuditorRole:
         general = GlobalSettings.objects.get(name=GlobalSettings.Names.GENERAL)
         assert general.value.get("enforce_mfa") is True  # still on: the auditor could not switch it off
         assert client.post("/api/folders/", {"name": "new-domain"}, format="json").status_code == 403
+
+
+@pytest.mark.django_db
+class TestGoldlineFive:
+    """v4.1.1-goldline.5: no library identifiers in the auditor's export; editors keep them for re-import."""
+
+    def test_strip_library_identifiers(self):
+        from core.goldline_exports import strip_library_identifiers
+
+        row = {"urn": "urn:x:req:1", "ref_id": "1.1", "answers": "[urn:x:q:1] Yes\n[urn:x:q:2] No"}
+        out = strip_library_identifiers(row)
+        assert "urn" not in out and out["ref_id"] == "1.1" and out["answers"] == "Yes\nNo"
+        assert row["urn"] == "urn:x:req:1"  # the input is not changed
+
+    def test_auditor_xlsx_export_has_no_library_identifiers(self, auditor_setup):
+        import io
+
+        import openpyxl
+
+        s = auditor_setup
+        resp = s["client"].get(f"/api/compliance-assessments/{s['a']['assessment'].id}/xlsx/")
+        assert resp.status_code == 200
+        body = b"".join(resp.streaming_content) if getattr(resp, "streaming", False) else resp.content
+        sheet = openpyxl.load_workbook(io.BytesIO(body)).active
+        headers = [c.value for c in sheet[1]]
+        assert "urn" not in headers and "ref_id" in headers
+        assert not any("urn:" in str(c.value) for row in sheet.iter_rows() for c in row if c.value)
+
+    def test_editor_xlsx_export_keeps_identifiers(self, auditor_setup):
+        import io
+
+        import openpyxl
+
+        s = auditor_setup
+        admin = User.objects.create_superuser("editor@tests.com")
+        _give_mfa(admin)
+        resp = _token_client(admin).get(f"/api/compliance-assessments/{s['a']['assessment'].id}/xlsx/")
+        assert resp.status_code == 200
+        body = b"".join(resp.streaming_content) if getattr(resp, "streaming", False) else resp.content
+        headers = [c.value for c in openpyxl.load_workbook(io.BytesIO(body)).active[1]]
+        assert "urn" in headers
+
+    def test_other_domain_requirement_is_404_for_the_api(self, auditor_setup):
+        s = auditor_setup
+        r = s["client"].get(f"/api/requirement-assessments/{s['b']['requirement'].id}/")
+        assert r.status_code == 404  # the screen turns this into a clean 404 (frontend test)

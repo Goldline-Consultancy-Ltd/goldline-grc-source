@@ -13198,6 +13198,17 @@ class ComplianceAssessmentViewSet(XRaysMixin, BaseModelViewSet):
 
             entries.append(entry)
 
+        # Goldline (v4.1.1-goldline.5): read-only users (the Goldline auditor role) get the export without the
+        # libraries' internal identifiers; people who can change the assessment keep them (re-import needs them).
+        if not RoleAssignment.is_access_allowed(
+            user=request.user,
+            perm=Permission.objects.get(codename="change_requirementassessment"),
+            folder=audit.folder,
+        ):
+            from core.goldline_exports import strip_library_identifiers
+
+            entries = [strip_library_identifiers(e) for e in entries]
+
         df = pd.DataFrame(entries)
         buffer = io.BytesIO()
 
