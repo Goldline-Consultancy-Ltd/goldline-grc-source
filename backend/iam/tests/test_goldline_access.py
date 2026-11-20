@@ -1,0 +1,342 @@
+"""Goldline v4.1.1-goldline.4: request-time expiry, API MFA requirement and the Goldline auditor role.
+
+Each test sets up its own users, domains and settings in the test database; nothing here touches a real instance.
+"""
+
+import uuid
+from datetime import date, timedelta
+
+import pytest
+from allauth.mfa.models import Authenticator
+from django.contrib.auth import authenticate
+from django.core.files.uploadedfile import SimpleUploadedFile
+from knox.models import AuthToken
+from rest_framework.test import APIClient
+
+from core.apps import startup
+from core.models import (
+    ComplianceAssessment,
+    Evidence,
+    Framework,
+    Perimeter,
+    RequirementAssessment,
+    RequirementAssignment,
+    RequirementNode,
+)
+from core.startup import GOLDLINE_AUDITOR_PERMISSIONS_LIST, READER_PERMISSIONS_LIST
+from core.utils import RoleCodename
+from global_settings.models import GlobalSettings
+from iam.goldline_access import MFA_SETUP_PATHS
+from iam.models import Folder, Role, RoleAssignment, User
+
+PASSWORD = "Correct-Horse-Battery-9"
+REVIEW_PERMISSIONS = {
+    "add_comment",
+    "add_requirementassignment",
+    "change_requirementassignment",
+    "transition_requirementassignment",
+}
+
+
+@pytest.fixture
+def app_config():
+    startup(sender=None, **{})
+
+
+def _token_client(user) -> APIClient:
+    client = APIClient()
+    _, token = AuthToken.objects.create(user=user)
+    client.credentials(HTTP_AUTHORIZATION=f"Token {token}")
+    return client
+
+
+def _set_enforce_mfa(on: bool):
+    general, _ = GlobalSettings.objects.get_or_create(name=GlobalSettings.Names.GENERAL, defaults={"value": {}})
+    value = dict(general.value or {})
+    value["enforce_mfa"] = on
+    general.value = value
+    general.save()
+
+
+def _give_mfa(user):
+    Authenticator.objects.create(user=user, type=Authenticator.Type.TOTP, data={"secret": "test"})
+
+
+def _domain(name):
+    return Folder.objects.create(
+        name=f"{name}-{uuid.uuid4().hex[:6]}",
+        parent_folder=Folder.get_root_folder(),
+        content_type=Folder.ContentType.DOMAIN,
+    )
+
+
+def _audit_in(domain):
+    perimeter = Perimeter.objects.create(name=f"p-{domain.name}", folder=domain)
+    framework = Framework.objects.create(name=f"fw-{domain.name}", folder=domain)
+    node = RequirementNode.objects.create(
+        framework=framework, folder=domain, urn=f"urn:test:{domain.name}:1", ref_id="1", assessable=True
+    )
+    assessment = ComplianceAssessment.objects.create(
+        name=f"ca-{domain.name}", framework=framework, folder=domain, perimeter=perimeter
+    )
+    requirement, _ = RequirementAssessment.objects.get_or_create(
+        compliance_assessment=assessment, requirement=node, defaults={"folder": domain}
+    )
+    evidence = Evidence.objects.create(name=f"ev-{domain.name}", folder=domain)
+    return {"assessment": assessment, "requirement": requirement, "evidence": evidence}
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# 1. Account expiry, checked at request time
+# ---------------------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestExpiry:
+    def test_token_refused_after_expiry(self, app_config):
+        user = User.objects.create_user(email="expired-token@tests.com", password=PASSWORD)
+        client = _token_client(user)
+        assert client.get("/api/iam/current-user/").status_code == 200
+        user.expiry_date = date.today() - timedelta(days=1)
+        user.save()
+        resp = client.get("/api/iam/current-user/")
+        assert resp.status_code == 401
+        assert client.get("/api/folders/").status_code == 401
+
+    def test_token_still_works_on_expiry_day(self, app_config):
+        user = User.objects.create_user(email="expiry-today@tests.com", password=PASSWORD)
+        user.expiry_date = date.today()
+        user.save()
+        assert _token_client(user).get("/api/iam/current-user/").status_code == 200
+
+    def test_session_refused_after_expiry(self, app_config):
+        user = User.objects.create_user(email="expired-session@tests.com", password=PASSWORD)
+        client = APIClient()
+        client.force_login(user)
+        user.expiry_date = date.today() - timedelta(days=1)
+        user.save()
+        # A session (cookie) is not an accepted way into the API; with or without it, an expired user gets nothing.
+        assert client.get("/api/iam/current-user/").status_code in (401, 403)
+
+    def test_password_sign_in_refused_after_expiry(self, app_config):
+        user = User.objects.create_user(email="expired-password@tests.com", password=PASSWORD)
+        assert authenticate(username=user.email, password=PASSWORD) == user
+        user.expiry_date = date.today() - timedelta(days=1)
+        user.save()
+        assert authenticate(username=user.email, password=PASSWORD) is None
+
+    def test_no_expiry_date_unaffected(self, app_config):
+        user = User.objects.create_user(email="no-expiry@tests.com", password=PASSWORD)
+        assert user.expiry_date is None
+        assert authenticate(username=user.email, password=PASSWORD) == user
+        assert _token_client(user).get("/api/iam/current-user/").status_code == 200
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# 2. MFA required for API use when enforce_mfa is on
+# ---------------------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestApiMfa:
+    def test_api_refused_without_mfa(self, app_config):
+        _set_enforce_mfa(True)
+        user = User.objects.create_user(email="no-mfa@tests.com", password=PASSWORD)
+        resp = _token_client(user).get("/api/folders/")
+        assert resp.status_code == 403
+        assert resp.json().get("detail", "").startswith("Set up multi-factor authentication")
+
+    def test_setup_paths_allowed_without_mfa(self, app_config):
+        _set_enforce_mfa(True)
+        user = User.objects.create_user(email="no-mfa-setup@tests.com", password=PASSWORD)
+        client = _token_client(user)
+        assert client.get("/api/iam/current-user/").status_code == 200
+        for path in MFA_SETUP_PATHS:
+            resp = client.get(path)
+            assert b"Set up multi-factor authentication" not in resp.content, path
+
+    def test_api_allowed_with_mfa(self, app_config):
+        _set_enforce_mfa(True)
+        user = User.objects.create_user(email="with-mfa@tests.com", password=PASSWORD)
+        _give_mfa(user)
+        assert _token_client(user).get("/api/folders/").status_code == 200
+
+    def test_api_allowed_when_not_enforced(self, app_config):
+        _set_enforce_mfa(False)
+        user = User.objects.create_user(email="not-enforced@tests.com", password=PASSWORD)
+        assert _token_client(user).get("/api/folders/").status_code == 200
+
+    def test_superuser_refused_without_mfa(self, app_config):
+        _set_enforce_mfa(True)
+        admin = User.objects.create_superuser("super-no-mfa@tests.com")
+        client = _token_client(admin)
+        assert client.get("/api/folders/").status_code == 403
+        assert client.get("/api/iam/current-user/").status_code == 200
+
+    def test_superuser_allowed_with_mfa(self, app_config):
+        _set_enforce_mfa(True)
+        admin = User.objects.create_superuser("super-with-mfa@tests.com")
+        _give_mfa(admin)
+        assert _token_client(admin).get("/api/folders/").status_code == 200
+
+    def test_expiry_checked_before_mfa(self, app_config):
+        _set_enforce_mfa(True)
+        user = User.objects.create_user(email="expired-no-mfa@tests.com", password=PASSWORD)
+        user.expiry_date = date.today() - timedelta(days=1)
+        user.save()
+        assert _token_client(user).get("/api/iam/current-user/").status_code == 401
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# 3. The Goldline auditor role
+# ---------------------------------------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def auditor_setup(app_config):
+    _set_enforce_mfa(True)
+    role = Role.objects.get(name=RoleCodename.GOLDLINE_AUDITOR.value)
+    domain_a, domain_b = _domain("audit-a"), _domain("audit-b")
+    child_of_a = Folder.objects.create(
+        name=f"child-{uuid.uuid4().hex[:6]}", parent_folder=domain_a, content_type=Folder.ContentType.DOMAIN
+    )
+    a, b, child = _audit_in(domain_a), _audit_in(domain_b), _audit_in(child_of_a)
+    auditor = User.objects.create_user(email="auditor-a@tests.com", password=PASSWORD)
+    _give_mfa(auditor)
+    assignment = RoleAssignment.objects.create(user=auditor, role=role, folder=Folder.get_root_folder(), is_recursive=False)
+    assignment.perimeter_folders.add(domain_a)
+    other = User.objects.create_user(email="someone-else@tests.com", password=PASSWORD)
+    return {
+        "role": role, "auditor": auditor, "client": _token_client(auditor), "other": other,
+        "domain_a": domain_a, "domain_b": domain_b, "child": child_of_a, "a": a, "b": b, "c": child,
+    }
+
+
+@pytest.mark.django_db
+class TestGoldlineAuditorRole:
+    def test_role_is_reader_plus_exactly_four(self, app_config):
+        role = Role.objects.get(name=RoleCodename.GOLDLINE_AUDITOR.value)
+        granted = set(role.permissions.values_list("codename", flat=True))
+        assert granted == set(GOLDLINE_AUDITOR_PERMISSIONS_LIST)
+        assert granted - set(READER_PERMISSIONS_LIST) == REVIEW_PERMISSIONS
+        for forbidden in (
+            "change_requirementassessment", "change_complianceassessment", "delete_evidence", "change_evidence",
+            "add_user", "change_user", "delete_user", "add_roleassignment", "change_roleassignment",
+            "change_globalsettings", "add_folder", "change_folder", "delete_folder", "backup",
+        ):
+            assert forbidden not in granted, forbidden
+        assert role.builtin is True
+
+    def test_sees_own_domain_only(self, auditor_setup):
+        s = auditor_setup
+        client = s["client"]
+        listed = {r["id"] for r in client.get("/api/compliance-assessments/").json()["results"]}
+        assert str(s["a"]["assessment"].id) in listed
+        assert str(s["b"]["assessment"].id) not in listed
+        assert str(s["c"]["assessment"].id) not in listed, "assignment is not recursive: child domains excluded"
+        evidences = {r["id"] for r in client.get("/api/evidences/").json()["results"]}
+        assert str(s["a"]["evidence"].id) in evidences
+        assert str(s["b"]["evidence"].id) not in evidences
+
+    def test_other_domain_unreachable_by_id(self, auditor_setup):
+        s = auditor_setup
+        client = s["client"]
+        b = s["b"]
+        for path in (
+            f"/api/compliance-assessments/{b['assessment'].id}/",
+            f"/api/requirement-assessments/{b['requirement'].id}/",
+            f"/api/evidences/{b['evidence'].id}/",
+            f"/api/evidences/{b['evidence'].id}/attachment/",
+            f"/api/folders/{s['domain_b'].id}/",
+            f"/api/folders/{s['domain_b'].id}/export/",
+        ):
+            assert client.get(path).status_code in (403, 404), path
+        guessed = uuid.uuid4()
+        assert client.get(f"/api/evidences/{guessed}/").status_code in (403, 404)
+
+    def test_cannot_change_results(self, auditor_setup):
+        s = auditor_setup
+        req = s["a"]["requirement"]
+        before = RequirementAssessment.objects.get(id=req.id).result
+        resp = s["client"].patch(
+            f"/api/requirement-assessments/{req.id}/", {"result": "compliant"}, format="json"
+        )
+        assert resp.status_code == 403
+        assert RequirementAssessment.objects.get(id=req.id).result == before
+        resp = s["client"].patch(
+            f"/api/compliance-assessments/{s['a']['assessment'].id}/", {"status": "done"}, format="json"
+        )
+        assert resp.status_code == 403
+
+    def test_can_review_in_own_domain(self, auditor_setup):
+        s = auditor_setup
+        assignment = RequirementAssignment.objects.create(
+            compliance_assessment=s["a"]["assessment"], folder=s["domain_a"], status="submitted"
+        )
+        resp = s["client"].post(
+            f"/api/requirement-assignments/{assignment.id}/set_status/",
+            {"status": "changes_requested", "reviewer_observation": "Please add the policy sign-off."},
+            format="json",
+        )
+        assert resp.status_code == 200, resp.content
+        assignment.refresh_from_db()
+        assert assignment.status == "changes_requested"
+
+    def test_cannot_review_in_other_domain(self, auditor_setup):
+        s = auditor_setup
+        assignment = RequirementAssignment.objects.create(
+            compliance_assessment=s["b"]["assessment"], folder=s["domain_b"], status="submitted"
+        )
+        resp = s["client"].post(
+            f"/api/requirement-assignments/{assignment.id}/set_status/", {"status": "closed"}, format="json"
+        )
+        assert resp.status_code in (403, 404)
+        assignment.refresh_from_db()
+        assert assignment.status == "submitted"
+
+    def test_cannot_export_outside_folder(self, auditor_setup):
+        s = auditor_setup
+        client = s["client"]
+        # The upstream assessment export answers 200 with a JSON "Permission denied" body instead of 403; what
+        # matters is that no archive and none of domain B's content comes back.
+        resp = client.get(f"/api/compliance-assessments/{s['b']['assessment'].id}/export/")
+        assert resp.status_code in (200, 403, 404)
+        assert resp.get("Content-Type", "").startswith("application/json"), "an archive was returned"
+        assert resp.json() == {"error": "Permission denied"} or resp.status_code in (403, 404)
+        assert s["b"]["assessment"].name.encode() not in resp.content
+        for path in (
+            f"/api/compliance-assessments/{s['b']['assessment'].id}/evidences_zip/",
+            f"/api/folders/{s['domain_b'].id}/export/",
+        ):
+            assert client.get(path).status_code in (403, 404, 405), path
+        exported = client.get("/api/evidences/export_csv/")
+        if exported.status_code == 200:
+            body = exported.content.decode("utf-8-sig")
+            assert s["b"]["evidence"].name not in body
+            assert s["c"]["evidence"].name not in body
+
+    def test_cannot_reach_users_or_settings(self, auditor_setup):
+        s = auditor_setup
+        client = s["client"]
+        users = client.get("/api/users/")
+        if users.status_code == 200:
+            emails = {u.get("email") for u in users.json()["results"]}
+            assert s["other"].email not in emails
+        assert client.get(f"/api/users/{s['other'].id}/").status_code in (403, 404)
+        assert client.post("/api/users/", {"email": "new@tests.com"}, format="json").status_code == 403
+        assert client.patch(f"/api/users/{s['other'].id}/", {"first_name": "x"}, format="json").status_code in (403, 404)
+        before = RoleAssignment.objects.count()
+        assert client.post(
+            "/api/role-assignments/",
+            {
+                "name": "self-grant", "user": str(s["auditor"].id), "role": str(s["role"].id),
+                "folder": str(Folder.get_root_folder().id),
+                "perimeter_folders": [str(s["domain_b"].id)], "is_recursive": False,
+            },
+            format="json",
+        ).status_code == 403
+        assert RoleAssignment.objects.count() == before
+        assert client.patch("/api/settings/general/object/", {"enforce_mfa": False}, format="json").status_code in (403, 405)
+        general = GlobalSettings.objects.get(name=GlobalSettings.Names.GENERAL)
+        assert general.value.get("enforce_mfa") is True  # still on: the auditor could not switch it off
+        assert client.post("/api/folders/", {"name": "new-domain"}, format="json").status_code == 403

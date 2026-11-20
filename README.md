@@ -15,6 +15,16 @@ Modified by Goldline Consultancy in October 2026. The changes are limited to bra
 
 Every change is recorded in [`goldline-brand.patch`](goldline-brand.patch). The code in this repository is upstream v4.1.1 with that patch already applied.
 
+Release v4.1.1-goldline.4 (November 2026) adds three access changes, recorded in
+[`deploy/goldline-4-auditor-access.patch`](deploy/goldline-4-auditor-access.patch):
+
+- a built-in role "Goldline auditor" (Reader plus comment, requirement assignment and review transition rights; it
+  cannot change assessment results);
+- sign-in and API use refused after a user's expiry date, checked on every request;
+- when MFA is required, a local user without MFA can use the API only for MFA set-up.
+
+The tests are in `backend/iam/tests/test_goldline_access.py`.
+
 ## What is included
 
 The parts needed to build and run the application: `backend/`, `frontend/`, `cli/`, the Docker Compose files and their helper scripts, and the licence files. Upstream documentation, CI configuration and other non-build material are left out; they are available unchanged in the upstream repository. The `enterprise/` directory is not included: it is licensed separately by intuitem and is not used by this build.
@@ -25,6 +35,7 @@ The parts needed to build and run the application: `backend/`, `frontend/`, `cli
 git clone --depth 1 --branch <new-version> https://github.com/intuitem/ciso-assistant-community.git
 cd ciso-assistant-community
 git apply --check /path/to/goldline-brand.patch && git apply /path/to/goldline-brand.patch
+git apply --check /path/to/goldline-4-auditor-access.patch && git apply /path/to/goldline-4-auditor-access.patch
 ```
 
 If `--check` reports conflicts, the upstream files changed; update the patch for the new version before building.

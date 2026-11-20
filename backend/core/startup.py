@@ -180,6 +180,17 @@ READER_PERMISSIONS_LIST = [
     "delete_notification",
 ]
 
+# Goldline (v4.1.1-goldline.4): an external auditor. Everything the Reader can see, plus the review workflow on
+# requirement assignments (approve = submitted to closed, request more evidence = submitted to changes_requested,
+# each transition logged as an event), managing assignments and commenting. It cannot change requirement
+# results (no change_requirementassessment), users, roles or settings; its scope is the folders it is assigned.
+GOLDLINE_AUDITOR_PERMISSIONS_LIST = READER_PERMISSIONS_LIST + [
+    "add_comment",
+    "add_requirementassignment",
+    "change_requirementassignment",
+    "transition_requirementassignment",
+]
+
 BASELINE_READER_PERMISSIONS_LIST = [
     "view_securityadvisory",
     "view_cwe",
@@ -2350,6 +2361,7 @@ def startup(sender=None, **kwargs):
         ),
         (RoleCodename.AUDITEE.value, AUDITEE_PERMISSIONS_LIST),
         (RoleCodename.TECHNICAL_TESTER.value, TECHNICAL_TESTER_PERMISSIONS_LIST),
+        (RoleCodename.GOLDLINE_AUDITOR.value, GOLDLINE_AUDITOR_PERMISSIONS_LIST),
     ):
         role, _ = Role.objects.get_or_create(name=name, builtin=True)
         role.permissions.set(Permission.objects.filter(codename__in=perm_list))
