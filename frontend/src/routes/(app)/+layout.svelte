@@ -183,10 +183,7 @@
 	>
 		<div class="flex items-start justify-between px-4">
 			<div>
-				<div
-					class="text-2xl font-bold pb-1 text-primary-500 dark:text-surface-50"
-					id="page-title"
-				>
+				<div class="text-2xl font-bold pb-1 text-primary-500 dark:text-surface-50" id="page-title">
 					{safeTranslate(displayTitle)}
 				</div>
 				{#if displayModelName}

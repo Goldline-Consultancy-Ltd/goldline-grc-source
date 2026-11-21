@@ -26,7 +26,9 @@ describe('background fetch outcomes (FND-283)', () => {
 
 	it('says nothing for a network TypeError while the page is leaving (Safari "Load failed", Firefox NetworkError)', () => {
 		expect(outcomeOfError(new TypeError('Load failed'), true)).toBe('interrupted');
-		expect(outcomeOfError(new TypeError('NetworkError when attempting to fetch resource.'), true)).toBe('interrupted');
+		expect(
+			outcomeOfError(new TypeError('NetworkError when attempting to fetch resource.'), true)
+		).toBe('interrupted');
 	});
 
 	it('still reports a network TypeError on a page that stays', () => {
