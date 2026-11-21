@@ -126,6 +126,9 @@ class MFALimitMiddleware:
     def __init__(self, get_response):
         self.get_response = get_response
         install()
+        from iam.goldline_totp_replay import install as install_totp_replay
+
+        install_totp_replay()  # Goldline (v4.1.1-goldline.9): also installed by IamConfig.ready
 
     def __call__(self, request):
         response = self.get_response(request)

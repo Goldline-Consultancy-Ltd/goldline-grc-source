@@ -12,6 +12,11 @@ class IamConfig(AppConfig):
 
         self._patch_client_check_secret(ServiceAccount)
 
+        # Goldline (v4.1.1-goldline.9, TC-AUTH-006): used second-factor codes recorded where every worker sees them.
+        from iam.goldline_totp_replay import install as install_totp_replay
+
+        install_totp_replay()
+
     def _patch_client_check_secret(self, ServiceAccount):
         """adapter hook for multi-secret/grace-period support."""
         from allauth.idp.oidc.models import Client

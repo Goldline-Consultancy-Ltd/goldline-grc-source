@@ -1,0 +1,530 @@
+diff --git a/backend/core/goldline_uploads.py b/backend/core/goldline_uploads.py
+index 6676e97..22a6338 100644
+--- a/backend/core/goldline_uploads.py
++++ b/backend/core/goldline_uploads.py
+@@ -4,7 +4,10 @@ Refused, whatever the file is called:
+ - executables and scripts: Windows (MZ), Linux (ELF), macOS (Mach-O, thin and fat), Java class files, WebAssembly,
+   Windows shortcuts (.lnk) and any file that starts with "#!";
+ - content that does not match the declared type (the file name's extension, and the content type the client sent);
+-- files over 25 MB (the Director's limit, 20 Nov 2026, the same as the workspace).
++- files over 25 MB (the Director's limit, 20 Nov 2026, the same as the workspace);
++- archives (goldline.9, 21 Nov 2026, matching the workspace): zip, 7z, rar, tar, gzip, bzip2, xz, zstd, lzip, cab and the
++  like, by name and by content. Office documents (docx, xlsx, pptx, odt, ods) are zip containers and stay accepted when
++  the container carries the document marker.
+ 
+ Only a new upload is read; a file already stored is not read again.
+ """
+@@ -13,6 +16,7 @@ from __future__ import annotations
+ 
+ import mimetypes
+ import os
++import zipfile
+ 
+ from django.core.exceptions import ValidationError
+ from django.core.files.uploadedfile import UploadedFile
+@@ -62,6 +66,26 @@ _EXECUTABLE_CONTENT_TYPES = {
+     "application/x-ms-installer",
+ }
+ 
++ARCHIVE_EXTENSIONS = {
++    "zip", "zipx", "7z", "rar", "tar", "gz", "tgz", "gzip", "bz2", "tbz", "tbz2", "xz", "txz", "zst", "tzst",
++    "lz", "lzma", "lz4", "z", "cab", "arj", "iso", "jar", "war", "ear", "apk", "cpio", "rpm", "deb", "dmg",
++}
++_ARCHIVE_SIGNATURES: tuple[bytes, ...] = (
++    b"7z\xbc\xaf\x27\x1c",  # 7-Zip
++    b"Rar!\x1a\x07",  # RAR 4 and 5
++    b"\x1f\x8b",  # gzip
++    b"BZh",  # bzip2
++    b"\xfd7zXZ\x00",  # xz
++    b"\x28\xb5\x2f\xfd",  # zstd
++    b"LZIP",  # lzip
++    b"MSCF",  # cab
++    b"\x60\xea",  # arj
++    b"\x1f\x9d",  # compress (.Z)
++    b"\x1f\xa0",  # compress (LZH)
++    b"\x04\x22\x4d\x18",  # lz4
++)
++_OFFICE_ZIP_EXTENSIONS = {"docx", "xlsx", "pptx", "odt", "ods"}
++
+ _OLE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+ _ZIP = (b"PK\x03\x04", b"PK\x05\x06")
+ _MEDIA_BOXES = (b"ftyp", b"moov", b"mdat", b"wide", b"free", b"skip", b"pnot")
+@@ -79,14 +103,10 @@ _BINARY_CHECKS = {
+     "pptx": lambda h: h.startswith(_ZIP),
+     "odt": lambda h: h.startswith(_ZIP),
+     "ods": lambda h: h.startswith(_ZIP),
+-    "zip": lambda h: h.startswith(_ZIP),
+     "doc": lambda h: h.startswith(_OLE),
+     "xls": lambda h: h.startswith(_OLE),
+     "ppt": lambda h: h.startswith(_OLE),
+     "msg": lambda h: h.startswith(_OLE),
+-    "7z": lambda h: h.startswith(b"7z\xbc\xaf\x27\x1c"),
+-    "gz": lambda h: h.startswith(b"\x1f\x8b"),
+-    "tar": lambda h: h[257:262] == b"ustar",
+     "mp4": lambda h: h[4:8] in _MEDIA_BOXES,
+     "mov": lambda h: h[4:8] in _MEDIA_BOXES,
+ }
+@@ -105,7 +125,7 @@ _STRICT_DECLARED = {
+     "image/webp": {"webp"},
+     "video/mp4": {"mp4"},
+     "video/quicktime": {"mov"},
+-    "application/zip": {"zip", "docx", "xlsx", "pptx", "odt", "ods"},
++    "application/zip": {"docx", "xlsx", "pptx", "odt", "ods"},
+ }
+ 
+ 
+@@ -119,6 +139,29 @@ def _upload_of(value):
+     return None
+ 
+ 
++def _is_office_document(upload) -> bool:
++    """A zip container that carries the OOXML or OpenDocument marker (a document, not an archive)."""
++    pos = upload.tell() if hasattr(upload, "tell") else 0
++    try:
++        upload.seek(0)
++        with zipfile.ZipFile(upload) as zf:
++            names = set(zf.namelist())
++        return "[Content_Types].xml" in names or "mimetype" in names
++    except (zipfile.BadZipFile, OSError, ValueError):
++        return False
++    finally:
++        upload.seek(pos)
++
++
++def _check_not_archive(upload, extension: str, head: bytes) -> None:
++    if extension in ARCHIVE_EXTENSIONS:
++        raise ValidationError("Archives (zip, 7z, rar, tar, gz and the like) are not accepted as evidence; upload the files themselves.")
++    if head.startswith(_ARCHIVE_SIGNATURES) or head[257:262] == b"ustar":
++        raise ValidationError("The file is an archive; archives are not accepted as evidence. Upload the files themselves.")
++    if head.startswith(_ZIP) and not (extension in _OFFICE_ZIP_EXTENSIONS and _is_office_document(upload)):
++        raise ValidationError("The file is a zip archive; archives are not accepted as evidence. Upload the files themselves.")
++
++
+ def _head(upload) -> bytes:
+     pos = upload.tell() if hasattr(upload, "tell") else 0
+     upload.seek(0)
+@@ -148,6 +191,8 @@ def check_evidence_upload(value) -> None:
+         if head.startswith(signature):
+             raise ValidationError(f"The file looks like {what}; executable files are not accepted as evidence.")
+ 
++    _check_not_archive(upload, extension, head)
++
+     if declared in _STRICT_DECLARED and extension not in _STRICT_DECLARED[declared]:
+         raise ValidationError("The file's declared type does not match its name.")
+ 
+diff --git a/backend/core/tests/test_goldline_evidence_uploads.py b/backend/core/tests/test_goldline_evidence_uploads.py
+index 72866f9..bd016a8 100644
+--- a/backend/core/tests/test_goldline_evidence_uploads.py
++++ b/backend/core/tests/test_goldline_evidence_uploads.py
+@@ -1,8 +1,12 @@
+-"""Goldline v4.1.1-goldline.8: evidence uploads are refused by content (executables, mismatched type) and over 25 MB.
++"""Goldline v4.1.1-goldline.8/9: evidence uploads are refused by content (executables, archives, mismatched type) and over 25 MB.
+ 
+ TC-SR-027 (executable) and TC-SR-028 (over the size limit) test the same through the API on the test copy.
+ """
+ 
++import io
++import tarfile
++import zipfile
++
+ import pytest
+ from django.core.exceptions import ValidationError
+ from django.core.files.uploadedfile import SimpleUploadedFile
+@@ -15,6 +19,27 @@ from core.apps import startup
+ from core.goldline_uploads import EVIDENCE_MAX_BYTES, check_evidence_upload
+ from core.models import Evidence, EvidenceRevision
+ 
++def _zip(members: dict[str, bytes]) -> bytes:
++    buf = io.BytesIO()
++    with zipfile.ZipFile(buf, "w") as zf:
++        for name, data in members.items():
++            zf.writestr(name, data)
++    return buf.getvalue()
++
++
++def _tar() -> bytes:
++    buf = io.BytesIO()
++    with tarfile.open(fileobj=buf, mode="w") as tf:
++        info = tarfile.TarInfo("notes.txt")
++        info.size = 5
++        tf.addfile(info, io.BytesIO(b"hello"))
++    return buf.getvalue()
++
++
++DOCX = _zip({"[Content_Types].xml": b"<Types/>", "word/document.xml": b"<w:document/>"})
++ODT = _zip({"mimetype": b"application/vnd.oasis.opendocument.text", "content.xml": b"<office/>"})
++PLAIN_ZIP = _zip({"notes.txt": b"hello"})
++
+ EXECUTABLES = {
+     "windows": b"MZ" + b"\x00" * 510,
+     "linux": b"\x7fELF\x02\x01\x01" + b"\x00" * 64,
+@@ -33,7 +58,8 @@ GOOD = {
+     "photo.jpg": (b"\xff\xd8\xff\xe0" + b"\x00" * 16, "image/jpeg"),
+     "notes.txt": (b"Access review completed.\n", "text/plain"),
+     "users.csv": (b"name,role\nalice,admin\n", "text/csv"),
+-    "policy.docx": (b"PK\x03\x04" + b"\x00" * 26, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
++    "policy.docx": (DOCX, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
++    "minutes.odt": (ODT, "application/vnd.oasis.opendocument.text"),
+     "legacy.xls": (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 16, "application/vnd.ms-excel"),
+     "config.yaml": (b"key: value\n", "application/x-yaml"),
+     "empty.txt": (b"", "text/plain"),
+@@ -72,6 +98,46 @@ class TestCheckEvidenceUpload:
+         with pytest.raises(ValidationError):
+             check_evidence_upload(_file(name, content))
+ 
++    @pytest.mark.parametrize(
++        "name,content",
++        [
++            ("bundle.zip", PLAIN_ZIP),
++            ("bundle.7z", b"7z\xbc\xaf\x27\x1c" + b"\x00" * 32),
++            ("bundle.rar", b"Rar!\x1a\x07\x01\x00" + b"\x00" * 32),
++            ("bundle.tar", _tar()),
++            ("bundle.gz", b"\x1f\x8b\x08\x00" + b"\x00" * 32),
++            ("bundle.tgz", b"\x1f\x8b\x08\x00" + b"\x00" * 32),
++            ("bundle.bz2", b"BZh91AY&SY" + b"\x00" * 32),
++            ("bundle.xz", b"\xfd7zXZ\x00" + b"\x00" * 32),
++            ("bundle.zst", b"\x28\xb5\x2f\xfd" + b"\x00" * 32),
++            ("empty.zip", b""),
++        ],
++    )
++    def test_archives_refused_by_name(self, name, content):
++        with pytest.raises(ValidationError, match="rchive"):
++            check_evidence_upload(_file(name, content))
++
++    @pytest.mark.parametrize(
++        "content",
++        [
++            PLAIN_ZIP,
++            _tar(),
++            b"7z\xbc\xaf\x27\x1c" + b"\x00" * 32,
++            b"Rar!\x1a\x07\x00" + b"\x00" * 32,
++            b"\x1f\x8b\x08\x00" + b"\x00" * 32,
++            b"BZh91AY&SY" + b"\x00" * 32,
++            b"\xfd7zXZ\x00" + b"\x00" * 32,
++        ],
++    )
++    def test_archives_refused_by_content_whatever_the_name(self, content):
++        for name in ("report.pdf", "notes.txt", "data.csv"):
++            with pytest.raises(ValidationError, match="rchive"):
++                check_evidence_upload(_file(name, content))
++
++    def test_plain_zip_called_docx_refused(self):
++        with pytest.raises(ValidationError, match="rchive"):
++            check_evidence_upload(_file("policy.docx", PLAIN_ZIP))
++
+     def test_declared_type_must_match_the_name(self):
+         with pytest.raises(ValidationError):
+             check_evidence_upload(_file("chart.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 16, "application/pdf"))
+@@ -144,6 +210,18 @@ class TestEvidenceUploadApi:
+         assert r.status_code == status.HTTP_400_BAD_REQUEST
+         assert not Evidence.objects.filter(name="ev-big.txt").exists()
+ 
++    def test_archive_refused_with_a_clear_message(self, client_and_folder):
++        client, folder = client_and_folder
++        r = self._post(client, folder, "bundle.zip", PLAIN_ZIP, "application/zip")
++        assert r.status_code == status.HTTP_400_BAD_REQUEST
++        assert b"rchive" in r.content
++        assert not Evidence.objects.filter(name="ev-bundle.zip").exists()
++
++    def test_office_document_still_accepted(self, client_and_folder):
++        client, folder = client_and_folder
++        r = self._post(client, folder, "policy.docx", DOCX, GOOD["policy.docx"][1])
++        assert r.status_code == status.HTTP_201_CREATED, r.content
++
+     def test_ordinary_pdf_accepted(self, client_and_folder):
+         client, folder = client_and_folder
+         content, content_type = GOOD["report.pdf"]
+diff --git a/backend/iam/apps.py b/backend/iam/apps.py
+index c7fee82..50eaf91 100644
+--- a/backend/iam/apps.py
++++ b/backend/iam/apps.py
+@@ -12,6 +12,11 @@ class IamConfig(AppConfig):
+ 
+         self._patch_client_check_secret(ServiceAccount)
+ 
++        # Goldline (v4.1.1-goldline.9, TC-AUTH-006): used second-factor codes recorded where every worker sees them.
++        from iam.goldline_totp_replay import install as install_totp_replay
++
++        install_totp_replay()
++
+     def _patch_client_check_secret(self, ServiceAccount):
+         """adapter hook for multi-secret/grace-period support."""
+         from allauth.idp.oidc.models import Client
+diff --git a/backend/iam/goldline_mfa_limit.py b/backend/iam/goldline_mfa_limit.py
+index 1e70a5b..4524ce3 100644
+--- a/backend/iam/goldline_mfa_limit.py
++++ b/backend/iam/goldline_mfa_limit.py
+@@ -126,6 +126,9 @@ class MFALimitMiddleware:
+     def __init__(self, get_response):
+         self.get_response = get_response
+         install()
++        from iam.goldline_totp_replay import install as install_totp_replay
++
++        install_totp_replay()  # Goldline (v4.1.1-goldline.9): also installed by IamConfig.ready
+ 
+     def __call__(self, request):
+         response = self.get_response(request)
+diff --git a/backend/iam/goldline_totp_replay.py b/backend/iam/goldline_totp_replay.py
+new file mode 100644
+index 0000000..a425fb5
+--- /dev/null
++++ b/backend/iam/goldline_totp_replay.py
+@@ -0,0 +1,103 @@
++"""Goldline (v4.1.1-goldline.9, TC-AUTH-006): a second-factor code is accepted once, whichever worker checks it.
++
++The sign-in library records a used code in Django's default cache, which is the process's own memory: the API runs
++several worker processes, so the same code sent again within its 30 seconds was accepted when the second request
++reached another worker.
++
++The record now lives next to the shared rate-limit cache (settings.CACHES["goldline_ratelimit"], a directory in the
++container's temporary directory that every worker shares): one marker file per user and code, created with O_EXCL so
++exactly one request wins even when two arrive at the same moment. A marker older than the code's lifetime is stale and
++is replaced. The file name is a hash; the code itself is never written to disk.
++
++This covers every check that goes through the library's TOTP.validate_code: the sign-in second factor and
++reauthentication. Activating an authenticator checks a code against a secret that is not stored yet and creates the
++authenticator once, so there is nothing to replay there.
++"""
++
++from __future__ import annotations
++
++import hashlib
++import os
++import random
++import time
++
++from django.conf import settings
++
++SUBDIR = "totp-used"
++PRUNE_AFTER_SECONDS = 3600
++
++
++def _directory() -> str:
++    base = settings.CACHES.get("goldline_ratelimit", {}).get("LOCATION") or os.path.join(
++        os.environ.get("TMPDIR", "/tmp"), "goldline-ratelimit"
++    )
++    path = os.path.join(base, SUBDIR)
++    os.makedirs(path, mode=0o700, exist_ok=True)
++    return path
++
++
++def _lifetime() -> int:
++    from allauth.mfa import app_settings
++
++    return int(app_settings.TOTP_PERIOD) * (2 * int(app_settings.TOTP_TOLERANCE) + 1)
++
++
++def _marker(directory: str, user_id, code: str) -> str:
++    digest = hashlib.sha256(f"{settings.SECRET_KEY}|{user_id}|{code}".encode()).hexdigest()
++    return os.path.join(directory, digest)
++
++
++def _prune(directory: str, now: float) -> None:
++    try:
++        for name in os.listdir(directory):
++            full = os.path.join(directory, name)
++            try:
++                if now - os.path.getmtime(full) > PRUNE_AFTER_SECONDS:
++                    os.unlink(full)
++            except OSError:
++                pass
++    except OSError:
++        pass
++
++
++def mark_code_used(user_id, code: str, now: float | None = None) -> bool:
++    """True the first time a user's code is seen within its lifetime, False on any reuse (from any worker)."""
++    now = time.time() if now is None else now
++    directory = _directory()
++    path = _marker(directory, user_id, code)
++    for _ in range(2):
++        try:
++            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
++        except FileExistsError:
++            try:
++                age = now - os.path.getmtime(path)
++            except FileNotFoundError:
++                continue  # removed meanwhile: try again
++            if age <= _lifetime():
++                return False
++            try:
++                os.unlink(path)  # stale marker from an earlier step
++            except FileNotFoundError:
++                pass
++            continue
++        os.close(fd)
++        os.utime(path, (now, now))
++        if random.random() < 0.01:
++            _prune(directory, now)
++        return True
++    return False
++
++
++def _mark_code_used(self, code: str) -> bool:
++    return mark_code_used(self.instance.user_id, code)
++
++
++_mark_code_used.goldline_wrapped = True
++
++
++def install() -> None:
++    """Replaces TOTP._mark_code_used in the library. Safe to call more than once."""
++    from allauth.mfa.totp.internal.auth import TOTP
++
++    if not getattr(TOTP._mark_code_used, "goldline_wrapped", False):
++        TOTP._mark_code_used = _mark_code_used
+diff --git a/backend/iam/tests/test_goldline_totp_replay.py b/backend/iam/tests/test_goldline_totp_replay.py
+new file mode 100644
+index 0000000..c5c4c70
+--- /dev/null
++++ b/backend/iam/tests/test_goldline_totp_replay.py
+@@ -0,0 +1,149 @@
++"""Goldline v4.1.1-goldline.9 (TC-AUTH-006): a second-factor code is accepted once, whichever worker checks it.
++
++Each test creates its own user in the test database; nothing here touches a real instance.
++"""
++
++import multiprocessing
++import os
++import shutil
++import time
++
++import pytest
++from allauth.mfa import app_settings as mfa_settings
++from allauth.mfa.models import Authenticator
++from allauth.mfa.totp.internal.auth import (
++    TOTP,
++    format_hotp_value,
++    generate_totp_secret,
++    hotp_value,
++)
++from django.core.cache import caches
++from django.test import Client
++
++from iam import goldline_mfa_limit as limit
++from iam import goldline_totp_replay as replay
++from iam.models import User
++
++PASSWORD = "Goldline-test-pw-1A!"
++LOGIN = "/api/_allauth/app/v1/auth/login"
++MFA = "/api/_allauth/app/v1/auth/2fa/authenticate"
++
++
++@pytest.fixture(autouse=True)
++def fresh_state():
++    shutil.rmtree(replay._directory(), ignore_errors=True)
++    caches[limit.CACHE_ALIAS].clear()
++    caches["default"].clear()
++    limit.install()
++    replay.install()
++    yield
++    shutil.rmtree(replay._directory(), ignore_errors=True)
++
++
++def _user_with_totp(email):
++    user = User.objects.create_user(email=email, password=PASSWORD)
++    secret = generate_totp_secret()
++    TOTP.activate(user, secret)
++    return user, secret
++
++
++def _step(now=None):
++    return int(time.time() if now is None else now) // mfa_settings.TOTP_PERIOD
++
++
++def _code(secret, step):
++    return format_hotp_value(hotp_value(secret, step))
++
++
++def _sign_in(email, code):
++    """A whole sign-in from a new client (as from another browser), returning the second-factor status."""
++    client = Client()
++    r = client.post(LOGIN, {"email": email, "password": PASSWORD}, content_type="application/json")
++    assert r.status_code == 401, r.content
++    token = r.json()["meta"]["session_token"]
++    return client.post(MFA, {"code": code}, content_type="application/json", HTTP_X_SESSION_TOKEN=token)
++
++
++def _race(directory_env, user_id, code, n, queue):
++    os.environ.update(directory_env)
++    queue.put(replay.mark_code_used(user_id, code))
++
++
++class TestMarker:
++    def test_first_use_wins_reuse_refused(self, settings):
++        assert replay.mark_code_used("u1", "123456") is True
++        assert replay.mark_code_used("u1", "123456") is False
++
++    def test_reuse_refused_when_the_process_cache_is_empty(self):
++        # Another worker has its own empty default cache: the shared record still refuses the code
++        assert replay.mark_code_used("u2", "654321") is True
++        caches["default"].clear()
++        assert replay.mark_code_used("u2", "654321") is False
++
++    def test_users_and_codes_are_separate(self):
++        assert replay.mark_code_used("u3", "111111") is True
++        assert replay.mark_code_used("u4", "111111") is True
++        assert replay.mark_code_used("u3", "222222") is True
++
++    def test_stale_marker_is_replaced(self):
++        start = time.time()
++        assert replay.mark_code_used("u5", "333333", now=start) is True
++        later = start + replay._lifetime() + 5
++        os.utime(replay._marker(replay._directory(), "u5", "333333"), (start, start))
++        assert replay.mark_code_used("u5", "333333", now=later) is True
++
++    def test_code_is_not_written_to_disk(self):
++        replay.mark_code_used("u6", "987654")
++        names = os.listdir(replay._directory())
++        assert names and not any("987654" in n for n in names)
++
++    @pytest.mark.skipif("fork" not in multiprocessing.get_all_start_methods(), reason="needs fork")
++    def test_simultaneous_workers_exactly_one_accepted(self):
++        ctx = multiprocessing.get_context("fork")
++        queue = ctx.Queue()
++        procs = [ctx.Process(target=_race, args=({}, "u7", "444444", i, queue)) for i in range(8)]
++        for p in procs:
++            p.start()
++        for p in procs:
++            p.join(30)
++        results = [queue.get(timeout=5) for _ in procs]
++        assert results.count(True) == 1, results
++        assert results.count(False) == 7, results
++
++
++@pytest.mark.django_db
++class TestSignInReplay:
++    def test_same_code_refused_on_second_sign_in_from_another_worker(self):
++        user, secret = _user_with_totp("totp-replay@tests.com")
++        step = _step()
++        code = _code(secret, step)
++        if _step() != step:  # the step changed while setting up
++            code = _code(secret, _step())
++        first = _sign_in(user.email, code)
++        assert first.status_code == 200, first.content
++        caches["default"].clear()  # the second request lands on a worker with an empty process cache
++        second = _sign_in(user.email, code)
++        assert second.status_code in (400, 429), second.content
++        assert "access_token" not in second.json().get("meta", {})
++
++    def test_fresh_code_in_the_next_step_still_works(self, monkeypatch):
++        user, secret = _user_with_totp("totp-next-step@tests.com")
++        step = _step()
++        assert _sign_in(user.email, _code(secret, step)).status_code == 200
++        next_time = (step + 1) * mfa_settings.TOTP_PERIOD + 1
++        monkeypatch.setattr(time, "time", lambda: float(next_time))
++        r = _sign_in(user.email, _code(secret, step + 1))
++        assert r.status_code == 200, r.content
++
++    def test_reauthentication_goes_through_the_shared_record(self):
++        user, secret = _user_with_totp("totp-reauth@tests.com")
++        totp = TOTP(Authenticator.objects.get(user=user, type=Authenticator.Type.TOTP))
++        code = _code(secret, _step())
++        assert totp.validate_code(code) is True
++        caches["default"].clear()
++        assert totp.validate_code(code) is False
++
++    def test_install_is_idempotent(self):
++        replay.install()
++        replay.install()
++        assert TOTP._mark_code_used.goldline_wrapped

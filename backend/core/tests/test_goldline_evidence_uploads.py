@@ -1,7 +1,11 @@
-"""Goldline v4.1.1-goldline.8: evidence uploads are refused by content (executables, mismatched type) and over 25 MB.
+"""Goldline v4.1.1-goldline.8/9: evidence uploads are refused by content (executables, archives, mismatched type) and over 25 MB.
 
 TC-SR-027 (executable) and TC-SR-028 (over the size limit) test the same through the API on the test copy.
 """
+
+import io
+import tarfile
+import zipfile
 
 import pytest
 from django.core.exceptions import ValidationError
@@ -14,6 +18,27 @@ from rest_framework.test import APIClient
 from core.apps import startup
 from core.goldline_uploads import EVIDENCE_MAX_BYTES, check_evidence_upload
 from core.models import Evidence, EvidenceRevision
+
+def _zip(members: dict[str, bytes]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, data in members.items():
+            zf.writestr(name, data)
+    return buf.getvalue()
+
+
+def _tar() -> bytes:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tf:
+        info = tarfile.TarInfo("notes.txt")
+        info.size = 5
+        tf.addfile(info, io.BytesIO(b"hello"))
+    return buf.getvalue()
+
+
+DOCX = _zip({"[Content_Types].xml": b"<Types/>", "word/document.xml": b"<w:document/>"})
+ODT = _zip({"mimetype": b"application/vnd.oasis.opendocument.text", "content.xml": b"<office/>"})
+PLAIN_ZIP = _zip({"notes.txt": b"hello"})
 
 EXECUTABLES = {
     "windows": b"MZ" + b"\x00" * 510,
@@ -33,7 +58,8 @@ GOOD = {
     "photo.jpg": (b"\xff\xd8\xff\xe0" + b"\x00" * 16, "image/jpeg"),
     "notes.txt": (b"Access review completed.\n", "text/plain"),
     "users.csv": (b"name,role\nalice,admin\n", "text/csv"),
-    "policy.docx": (b"PK\x03\x04" + b"\x00" * 26, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+    "policy.docx": (DOCX, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+    "minutes.odt": (ODT, "application/vnd.oasis.opendocument.text"),
     "legacy.xls": (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 16, "application/vnd.ms-excel"),
     "config.yaml": (b"key: value\n", "application/x-yaml"),
     "empty.txt": (b"", "text/plain"),
@@ -71,6 +97,46 @@ class TestCheckEvidenceUpload:
     def test_content_must_match_the_name(self, name, content):
         with pytest.raises(ValidationError):
             check_evidence_upload(_file(name, content))
+
+    @pytest.mark.parametrize(
+        "name,content",
+        [
+            ("bundle.zip", PLAIN_ZIP),
+            ("bundle.7z", b"7z\xbc\xaf\x27\x1c" + b"\x00" * 32),
+            ("bundle.rar", b"Rar!\x1a\x07\x01\x00" + b"\x00" * 32),
+            ("bundle.tar", _tar()),
+            ("bundle.gz", b"\x1f\x8b\x08\x00" + b"\x00" * 32),
+            ("bundle.tgz", b"\x1f\x8b\x08\x00" + b"\x00" * 32),
+            ("bundle.bz2", b"BZh91AY&SY" + b"\x00" * 32),
+            ("bundle.xz", b"\xfd7zXZ\x00" + b"\x00" * 32),
+            ("bundle.zst", b"\x28\xb5\x2f\xfd" + b"\x00" * 32),
+            ("empty.zip", b""),
+        ],
+    )
+    def test_archives_refused_by_name(self, name, content):
+        with pytest.raises(ValidationError, match="rchive"):
+            check_evidence_upload(_file(name, content))
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            PLAIN_ZIP,
+            _tar(),
+            b"7z\xbc\xaf\x27\x1c" + b"\x00" * 32,
+            b"Rar!\x1a\x07\x00" + b"\x00" * 32,
+            b"\x1f\x8b\x08\x00" + b"\x00" * 32,
+            b"BZh91AY&SY" + b"\x00" * 32,
+            b"\xfd7zXZ\x00" + b"\x00" * 32,
+        ],
+    )
+    def test_archives_refused_by_content_whatever_the_name(self, content):
+        for name in ("report.pdf", "notes.txt", "data.csv"):
+            with pytest.raises(ValidationError, match="rchive"):
+                check_evidence_upload(_file(name, content))
+
+    def test_plain_zip_called_docx_refused(self):
+        with pytest.raises(ValidationError, match="rchive"):
+            check_evidence_upload(_file("policy.docx", PLAIN_ZIP))
 
     def test_declared_type_must_match_the_name(self):
         with pytest.raises(ValidationError):
@@ -143,6 +209,18 @@ class TestEvidenceUploadApi:
         r = self._post(client, folder, "big.txt", b"A" * (EVIDENCE_MAX_BYTES + 1), "text/plain")
         assert r.status_code == status.HTTP_400_BAD_REQUEST
         assert not Evidence.objects.filter(name="ev-big.txt").exists()
+
+    def test_archive_refused_with_a_clear_message(self, client_and_folder):
+        client, folder = client_and_folder
+        r = self._post(client, folder, "bundle.zip", PLAIN_ZIP, "application/zip")
+        assert r.status_code == status.HTTP_400_BAD_REQUEST
+        assert b"rchive" in r.content
+        assert not Evidence.objects.filter(name="ev-bundle.zip").exists()
+
+    def test_office_document_still_accepted(self, client_and_folder):
+        client, folder = client_and_folder
+        r = self._post(client, folder, "policy.docx", DOCX, GOOD["policy.docx"][1])
+        assert r.status_code == status.HTTP_201_CREATED, r.content
 
     def test_ordinary_pdf_accepted(self, client_and_folder):
         client, folder = client_and_folder
