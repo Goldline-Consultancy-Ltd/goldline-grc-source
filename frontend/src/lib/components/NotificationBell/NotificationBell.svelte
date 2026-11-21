@@ -3,6 +3,7 @@
 	import { m } from '$paraglide/messages';
 	import { unreadNotificationCount } from '$lib/utils/stores';
 	import { onMount } from 'svelte';
+	import { outcomeOfError, outcomeOfStatus, pageIsLeaving } from '$lib/utils/background-fetch';
 
 	/**
 	 * Unread badge for the app bar. No websockets in this stack, so the count is
@@ -26,21 +27,37 @@
 	const title = $derived(count > 0 ? m.unreadNotifications({ count }) : m.noUnreadNotifications());
 
 	let lastRefresh = 0;
+	// Goldline (goldline.10, FND-283): signed out or not allowed means stop polling quietly; a request cut by
+	// navigation or unload says nothing; other failures are a console warning, never an error.
+	let stopped = false;
+	let inFlight: AbortController | null = null;
 
 	async function refresh({ force = false } = {}) {
+		if (stopped) return;
 		const now = Date.now();
 		if (!force && now - lastRefresh < MIN_REFRESH_GAP_MS) return;
 		lastRefresh = now;
+		inFlight?.abort();
+		const controller = new AbortController();
+		inFlight = controller;
 		try {
-			const res = await fetch('/fe-api/notifications/unread-count');
-			if (!res.ok) throw new Error(String(res.status));
+			const res = await fetch('/fe-api/notifications/unread-count', { signal: controller.signal });
+			const outcome = outcomeOfStatus(res.status);
+			if (outcome === 'stop') {
+				stopped = true;
+				return;
+			}
+			if (outcome !== 'ok') throw new Error(`HTTP ${res.status}`);
 			const data = await res.json();
 			unreadNotificationCount.set(Number(data?.count ?? 0));
 			failed = false;
 		} catch (error) {
 			// A failed poll must never break the app bar; keep the last known count.
+			if (outcomeOfError(error, pageIsLeaving()) === 'interrupted') return;
 			failed = true;
-			console.error('Could not refresh the unread notification count:', error);
+			console.warn('Could not refresh the unread notification count:', error);
+		} finally {
+			if (inFlight === controller) inFlight = null;
 		}
 	}
 
@@ -50,10 +67,14 @@
 		const onFocus = () => {
 			if (document.visibilityState === 'visible') refresh();
 		};
+		const onLeave = () => inFlight?.abort();
 		document.addEventListener('visibilitychange', onFocus);
+		window.addEventListener('pagehide', onLeave);
 		return () => {
 			clearInterval(interval);
 			document.removeEventListener('visibilitychange', onFocus);
+			window.removeEventListener('pagehide', onLeave);
+			inFlight?.abort();
 		};
 	});
 

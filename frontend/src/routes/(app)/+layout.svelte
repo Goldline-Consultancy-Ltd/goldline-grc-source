@@ -17,6 +17,7 @@
 		getStartedTrigger
 	} from '$lib/utils/stores';
 	import { getCookie, deleteCookie } from '$lib/utils/cookies';
+	import { outcomeOfError, outcomeOfStatus, pageIsLeaving } from '$lib/utils/background-fetch';
 	import { browser } from '$app/environment';
 	import { page } from '$app/stores';
 	import { m } from '$paraglide/messages';
@@ -146,11 +147,19 @@
 			const fromLogin = getCookie('from_login');
 			if (fromLogin === 'true') {
 				deleteCookie('from_login');
-				fetch('/fe-api/waiting-risk-acceptances').then(async (res) => {
-					const data = await res.json();
-					const number = data.count ?? 0;
-					if (number <= 0) return;
-				});
+				// Goldline (goldline.10, FND-283): a request cut by the next navigation must not surface as an uncaught
+				// "TypeError: Load failed" (Safari) or NetworkError (Firefox); real failures are a warning only.
+				fetch('/fe-api/waiting-risk-acceptances')
+					.then(async (res) => {
+						if (outcomeOfStatus(res.status) !== 'ok') return;
+						const data = await res.json();
+						const number = data.count ?? 0;
+						if (number <= 0) return;
+					})
+					.catch((error) => {
+						if (outcomeOfError(error, pageIsLeaving()) === 'interrupted') return;
+						console.warn('Could not check waiting risk acceptances:', error);
+					});
 			}
 		}
 	});
