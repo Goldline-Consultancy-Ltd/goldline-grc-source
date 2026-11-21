@@ -3382,6 +3382,20 @@ class EvidenceWriteSerializer(BaseModelSerializer):
         model = Evidence
         fields = "__all__"
 
+    def validate_attachment(self, value):
+        # Goldline (v4.1.1-goldline.8): the same checks as an evidence revision's attachment (name, size, content).
+        from core.goldline_uploads import check_evidence_upload
+        from core.validators import validate_file_name, validate_file_size
+
+        if value:
+            try:
+                validate_file_size(value)
+                validate_file_name(value)
+                check_evidence_upload(value)
+            except DjangoValidationError as e:
+                raise serializers.ValidationError(e.messages)
+        return value
+
     def create(self, validated_data):
         attachment = validated_data.pop("attachment", None)
         link = validated_data.pop("link", None)
@@ -3481,6 +3495,17 @@ class EvidenceRevisionWriteSerializer(BaseModelSerializer):
         model = EvidenceRevision
         fields = "__all__"
         read_only_fields = ["version"]
+
+    def validate_attachment(self, value):
+        # Goldline (v4.1.1-goldline.8): content and 25 MB checks on top of the model's name and size validators.
+        from core.goldline_uploads import check_evidence_upload
+
+        if value:
+            try:
+                check_evidence_upload(value)
+            except DjangoValidationError as e:
+                raise serializers.ValidationError(e.messages)
+        return value
 
     def validate(self, attrs):
         attrs = super().validate(attrs)

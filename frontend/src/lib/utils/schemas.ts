@@ -71,13 +71,19 @@ export const quickStartSchema = z.object({
 	risk_assessment_name: z.string().optional()
 });
 
+// Goldline (v4.1.1-goldline.8): the library's default email pattern is invalid under the v flag that browsers now use
+// for an input's pattern attribute (unescaped '-' in a character class), which logs a console error on every email
+// field. Same addresses accepted; '-' escaped.
+export const EMAIL_PATTERN =
+	/^(?:[A-Za-z0-9_'+\-]+\.)*[A-Za-z0-9_'+\-]*[A-Za-z0-9_+\-]@(?:[A-Za-z0-9][A-Za-z0-9\-]*\.)+[A-Za-z]{2,}$/;
+
 export const loginSchema = z
 	.object({
 		username: z
 			.string({
 				error: 'Email is required'
 			})
-			.email(),
+			.email({ pattern: EMAIL_PATTERN }),
 		password: z.string({
 			error: 'Password is required'
 		})
@@ -515,7 +521,7 @@ export const RequirementAssessmentSchema = z.object({
 });
 
 export const UserEditSchema = z.object({
-	email: z.string().email(),
+	email: z.string().email({ pattern: EMAIL_PATTERN }),
 	language: z.string().optional().default(''),
 	first_name: z.string().optional(),
 	last_name: z.string().optional(),
@@ -528,7 +534,7 @@ export const UserEditSchema = z.object({
 });
 
 export const UserCreateSchema = z.object({
-	email: z.string().email(),
+	email: z.string().email({ pattern: EMAIL_PATTERN }),
 	language: z.string().optional().default(''),
 	observation: z.string().optional().nullable(),
 	expiry_date: z
@@ -723,7 +729,7 @@ export const GeneralSettingsSchema = z.object({
 	default_date_format: z.string().default('auto').optional(),
 	default_packager: z
 		.string()
-		.regex(/^[a-z0-9_-]+$/)
+		.regex(/^[a-z0-9_\-]+$/)
 		.default('custom')
 		.optional(),
 	llm_provider: z.string().default('ollama').optional(),
@@ -1041,7 +1047,7 @@ export const solutionSchema = z.object({
 export const representativeSchema = z.object({
 	create_user: z.boolean().optional().default(false),
 	language: z.string().optional().default(''),
-	email: z.string().email(),
+	email: z.string().email({ pattern: EMAIL_PATTERN }),
 	entity: z.string(),
 	first_name: z.string().optional(),
 	last_name: z.string().optional(),
@@ -2127,7 +2133,7 @@ export const DashboardWidgetSchema = z.object({
 
 export const teamSchema = z.object({
 	...NameDescriptionMixin,
-	team_email: z.string().email().optional(),
+	team_email: z.string().email({ pattern: EMAIL_PATTERN }).optional(),
 	folder: z.string(),
 	members: z.array(z.string().uuid().optional()).optional(),
 	leader: z.string().uuid().optional().nullable(),
