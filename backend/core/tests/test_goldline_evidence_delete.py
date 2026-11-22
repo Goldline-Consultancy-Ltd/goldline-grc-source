@@ -54,6 +54,7 @@ def _domain(name):
         name=f"{name}-{uuid.uuid4().hex[:6]}",
         parent_folder=Folder.get_root_folder(),
         content_type=Folder.ContentType.DOMAIN,
+        create_iam_groups=True,
     )
 
 
