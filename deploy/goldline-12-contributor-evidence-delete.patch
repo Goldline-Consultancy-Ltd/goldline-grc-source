@@ -1,0 +1,553 @@
+diff --git a/backend/core/goldline_evidence_delete.py b/backend/core/goldline_evidence_delete.py
+new file mode 100644
+index 0000000..81fa6c5
+--- /dev/null
++++ b/backend/core/goldline_evidence_delete.py
+@@ -0,0 +1,77 @@
++"""Goldline v4.1.1-goldline.12: who may delete evidence (R-IAM-03; Director, 22 Nov 2026).
++
++Only administrators and domain managers may delete evidence, an evidence revision or an evidence file.
++Contributors (built-in Analyst, the role client contributors hold), third-party respondents, auditees,
++approvers, readers and auditors may not.
++
++Two layers:
++1. The role definitions (core/startup.py) no longer carry delete_evidence or delete_evidencerevision for
++   the Analyst, third-party respondent and auditee roles, and migration iam 0032 removes them from the
++   stored roles.
++2. This module is a server-side check that does not trust the role definitions: every evidence delete
++   path also asks `may_delete_evidence`, which allows only superusers, members of the global
++   administrators group, and holders of the built-in Administrator or Domain manager role on the
++   evidence's domain. A role misconfigured later (a custom role, or delete rights added back to the
++   Analyst) still cannot delete evidence.
++"""
++
++from __future__ import annotations
++
++from rest_framework import status
++from rest_framework.response import Response
++
++from core.utils import RoleCodename
++
++# Roles that may delete evidence on the folders they cover.
++EVIDENCE_DELETE_ROLES = frozenset({RoleCodename.ADMINISTRATOR.value, RoleCodename.DOMAIN_MANAGER.value})
++
++# Permissions removed from every other built-in role that held them.
++EVIDENCE_DELETE_PERMISSIONS = ("delete_evidence", "delete_evidencerevision")
++ROLES_WITHOUT_EVIDENCE_DELETE = (
++    RoleCodename.ANALYST.value,
++    RoleCodename.THIRD_PARTY_RESPONDENT.value,
++    RoleCodename.AUDITEE.value,
++)
++
++REFUSAL = {"detail": "You do not have permission to delete evidence."}
++
++
++def refused() -> Response:
++    return Response(REFUSAL, status=status.HTTP_403_FORBIDDEN)
++
++
++def may_delete_evidence(user, folder) -> bool:
++    """True only for a superuser, a global administrator, or a holder of an allowed role covering `folder`."""
++    from iam.models import RoleAssignment, User
++
++    if not isinstance(user, User) or not user.is_active or folder is None:
++        return False
++    if user.is_superuser or user.is_admin():
++        return True
++    assignments = RoleAssignment.get_role_assignments_from_user(user).filter(
++        role__name__in=EVIDENCE_DELETE_ROLES, role__builtin=True
++    )
++    ancestor_ids = None
++    for ra in assignments.prefetch_related("perimeter_folders"):
++        ids = {f.id for f in ra.perimeter_folders.all()}
++        if folder.id in ids:
++            return True
++        if ra.is_recursive and ids:
++            if ancestor_ids is None:
++                ancestor_ids = set(folder.ancestors.values_list("id", flat=True))
++            if ids & ancestor_ids:
++                return True
++    return False
++
++
++def may_delete_evidence_object(user, obj) -> bool:
++    """Evidence or EvidenceRevision: checked on the folder that owns it (a revision's evidence folder)."""
++    from iam.models import Folder
++
++    folder = None
++    evidence = getattr(obj, "evidence", None)
++    if evidence is not None:
++        folder = Folder.get_folder(evidence)
++    if folder is None:
++        folder = Folder.get_folder(obj)
++    return may_delete_evidence(user, folder)
+diff --git a/backend/core/startup.py b/backend/core/startup.py
+index 767203f..7befa2b 100644
+--- a/backend/core/startup.py
++++ b/backend/core/startup.py
+@@ -396,6 +396,8 @@ APPROVER_PERMISSIONS_LIST = [
+ ]
+ 
+ ANALYST_PERMISSIONS_LIST = [
++    # Goldline v4.1.1-goldline.12: no evidence delete rights (delete_evidence,
++    # delete_evidencerevision); see core/goldline_evidence_delete.py.
+     "view_customfielddefinition",
+     "view_compliance_assessment_full",
+     "view_object_audittrail",
+@@ -454,7 +456,6 @@ ANALYST_PERMISSIONS_LIST = [
+     "delete_complianceassessment",
+     "delete_entity",
+     "delete_entityassessment",
+-    "delete_evidence",
+     "delete_policy",
+     "delete_perimeter",
+     "delete_referencecontrol",
+@@ -686,7 +687,6 @@ ANALYST_PERMISSIONS_LIST = [
+     "add_evidencerevision",
+     "view_evidencerevision",
+     "change_evidencerevision",
+-    "delete_evidencerevision",
+     # document management
+     "add_documentcontainer",
+     "view_documentcontainer",
+@@ -2023,6 +2023,8 @@ ADMINISTRATOR_PERMISSIONS_LIST = [
+ ]
+ 
+ THIRD_PARTY_RESPONDENT_PERMISSIONS_LIST = [
++    # Goldline v4.1.1-goldline.12: no evidence delete rights (delete_evidence,
++    # delete_evidencerevision); see core/goldline_evidence_delete.py.
+     "view_complianceassessment",
+     "view_requirementassessment",
+     "change_requirementassessment",
+@@ -2034,11 +2036,9 @@ THIRD_PARTY_RESPONDENT_PERMISSIONS_LIST = [
+     "view_evidence",
+     "add_evidence",
+     "change_evidence",
+-    "delete_evidence",
+     "add_evidencerevision",
+     "view_evidencerevision",
+     "change_evidencerevision",
+-    "delete_evidencerevision",
+     "view_folder",
+     "view_requirementassignment",
+     "transition_requirementassignment",
+@@ -2061,6 +2061,8 @@ THIRD_PARTY_RESPONDENT_PERMISSIONS_LIST = [
+ ]
+ 
+ AUDITEE_PERMISSIONS_LIST = [
++    # Goldline v4.1.1-goldline.12: no evidence delete rights (delete_evidence,
++    # delete_evidencerevision); see core/goldline_evidence_delete.py.
+     "view_complianceassessment",
+     "view_requirementassessment",
+     "change_requirementassessment",
+@@ -2073,11 +2075,9 @@ AUDITEE_PERMISSIONS_LIST = [
+     "view_evidence",
+     "add_evidence",
+     "change_evidence",
+-    "delete_evidence",
+     "view_evidencerevision",
+     "add_evidencerevision",
+     "change_evidencerevision",
+-    "delete_evidencerevision",
+     "view_folder",
+     "view_requirementassignment",
+     "transition_requirementassignment",
+diff --git a/backend/core/tests/test_goldline_evidence_delete.py b/backend/core/tests/test_goldline_evidence_delete.py
+new file mode 100644
+index 0000000..f0cd745
+--- /dev/null
++++ b/backend/core/tests/test_goldline_evidence_delete.py
+@@ -0,0 +1,288 @@
++"""Goldline v4.1.1-goldline.12: only administrators and domain managers delete evidence (R-IAM-03).
++
++A contributor (built-in Analyst, the role the client contributor holds), a reader, the Goldline auditor, a
++third-party respondent and an auditee cannot delete evidence, an evidence revision or an evidence file, by any
++endpoint; domain managers (own domain only) and administrators still can. Two domains, A and B, prove that a
++contributor or domain manager in B cannot delete A's evidence. Every test builds its own users and domains in the
++test database; nothing here touches a real instance.
++"""
++
++import importlib
++import uuid
++
++import pytest
++from django.apps import apps as django_apps
++from django.contrib.auth.models import Permission
++from django.core.files.uploadedfile import SimpleUploadedFile
++from knox.models import AuthToken
++from rest_framework.test import APIClient
++
++from core.apps import startup
++from core.goldline_evidence_delete import (
++    EVIDENCE_DELETE_PERMISSIONS,
++    ROLES_WITHOUT_EVIDENCE_DELETE,
++    may_delete_evidence,
++)
++from core.models import Evidence, EvidenceRevision
++from core.utils import RoleCodename
++from global_settings.models import GlobalSettings
++from iam.models import Folder, Role, RoleAssignment, User, UserGroup
++
++PASSWORD = "Correct-Horse-Battery-9"
++MIGRATION = importlib.import_module("iam.migrations.0032_goldline_no_evidence_delete_for_contributors")
++
++
++@pytest.fixture
++def app_config():
++    startup(sender=None, **{})
++    general, _ = GlobalSettings.objects.get_or_create(name=GlobalSettings.Names.GENERAL, defaults={"value": {}})
++    value = dict(general.value or {})
++    value["enforce_mfa"] = False
++    general.value = value
++    general.save()
++
++
++def _client(user) -> APIClient:
++    client = APIClient()
++    _, token = AuthToken.objects.create(user=user)
++    client.credentials(HTTP_AUTHORIZATION=f"Token {token}")
++    return client
++
++
++def _domain(name):
++    return Folder.objects.create(
++        name=f"{name}-{uuid.uuid4().hex[:6]}",
++        parent_folder=Folder.get_root_folder(),
++        content_type=Folder.ContentType.DOMAIN,
++        create_iam_groups=True,
++    )
++
++
++def _user_with(role_name, domain, label):
++    user = User.objects.create_user(email=f"{label}-{uuid.uuid4().hex[:6]}@tests.com", password=PASSWORD)
++    ra = RoleAssignment.objects.create(
++        user=user, role=Role.objects.get(name=role_name), folder=Folder.get_root_folder(), is_recursive=False
++    )
++    ra.perimeter_folders.add(domain)
++    return user
++
++
++def _evidence(domain, tag="ev"):
++    evidence = Evidence.objects.create(name=f"{tag}-{uuid.uuid4().hex[:6]}", folder=domain)
++    revision = EvidenceRevision.objects.create(
++        evidence=evidence, attachment=SimpleUploadedFile(f"{tag}.txt", b"evidence text\n", content_type="text/plain")
++    )
++    return evidence, revision
++
++
++def _alive(evidence, revision):
++    revision = EvidenceRevision.objects.filter(id=revision.id).first()
++    return (
++        Evidence.objects.filter(id=evidence.id).exists(),
++        revision is not None,
++        bool(revision and revision.attachment and revision.attachment.storage.exists(revision.attachment.name)),
++    )
++
++
++def _try_every_delete(client, domain):
++    """Every evidence delete path, each on fresh evidence. Returns {path: (status, (evidence, revision, file) alive)}."""
++    out = {}
++    e, r = _evidence(domain, "rest")
++    out["DELETE evidences/{id}/"] = (client.delete(f"/api/evidences/{e.id}/").status_code, _alive(e, r))
++    e, r = _evidence(domain, "rev")
++    out["DELETE evidence-revisions/{id}/"] = (client.delete(f"/api/evidence-revisions/{r.id}/").status_code, _alive(e, r))
++    e, r = _evidence(domain, "file")
++    out["POST evidence-revisions/{id}/delete_attachment/"] = (
++        client.post(f"/api/evidence-revisions/{r.id}/delete_attachment/").status_code,
++        _alive(e, r),
++    )
++    e, r = _evidence(domain, "batch")
++    resp = client.post("/api/evidences/batch-action/", {"action": "delete", "ids": [str(e.id)]}, format="json")
++    out["POST evidences/batch-action/ delete"] = (
++        200 if resp.status_code == 200 and resp.json().get("succeeded") else 403,
++        _alive(e, r),
++    )
++    e, r = _evidence(domain, "batchrev")
++    resp = client.post("/api/evidence-revisions/batch-action/", {"action": "delete", "ids": [str(r.id)]}, format="json")
++    out["POST evidence-revisions/batch-action/ delete"] = (
++        200 if resp.status_code == 200 and resp.json().get("succeeded") else 403,
++        _alive(e, r),
++    )
++    return out
++
++
++def _assert_all_refused(results, who):
++    for path, (code, alive) in results.items():
++        assert code in (403, 404), f"{who}: {path} answered {code}"
++        assert alive == (True, True, True), f"{who}: {path} removed something {alive}"
++
++
++@pytest.fixture
++def two_domains(app_config):
++    a, b = _domain("ctb-a"), _domain("ctb-b")
++    for d in (a, b):
++        Folder.create_default_ug_and_ra(d)  # the per-domain built-in groups the screens use
++    return a, b
++
++
++@pytest.mark.django_db
++class TestRoleDefinitions:
++    def test_contributor_like_roles_hold_no_evidence_delete(self, app_config):
++        for name in ROLES_WITHOUT_EVIDENCE_DELETE + (
++            RoleCodename.READER.value,
++            RoleCodename.APPROVER.value,
++            RoleCodename.GOLDLINE_AUDITOR.value,
++        ):
++            granted = set(Role.objects.get(name=name).permissions.values_list("codename", flat=True))
++            assert not granted & set(EVIDENCE_DELETE_PERMISSIONS), name
++
++    def test_contributor_keeps_add_and_change(self, app_config):
++        granted = set(Role.objects.get(name=RoleCodename.ANALYST.value).permissions.values_list("codename", flat=True))
++        assert {"add_evidence", "change_evidence", "add_evidencerevision", "change_evidencerevision"} <= granted
++
++    def test_administrator_and_domain_manager_keep_delete(self, app_config):
++        for name in (RoleCodename.ADMINISTRATOR.value, RoleCodename.DOMAIN_MANAGER.value):
++            granted = set(Role.objects.get(name=name).permissions.values_list("codename", flat=True))
++            assert set(EVIDENCE_DELETE_PERMISSIONS) <= granted, name
++
++    def test_startup_resync_does_not_bring_delete_back(self, app_config):
++        startup(sender=None, **{})
++        granted = set(Role.objects.get(name=RoleCodename.ANALYST.value).permissions.values_list("codename", flat=True))
++        assert "delete_evidence" not in granted
++
++
++@pytest.mark.django_db
++class TestContributorRefused:
++    def test_contributor_refused_on_every_delete_path(self, two_domains):
++        a, _ = two_domains
++        _assert_all_refused(_try_every_delete(_client(_user_with("BI-RL-ANA", a, "ctb")), a), "contributor")
++
++    def test_contributor_rest_delete_is_403(self, two_domains):
++        a, _ = two_domains
++        client = _client(_user_with("BI-RL-ANA", a, "ctb"))
++        e, r = _evidence(a)
++        assert client.get(f"/api/evidences/{e.id}/").status_code == 200  # it can see it
++        assert client.delete(f"/api/evidences/{e.id}/").status_code == 403
++        assert client.delete(f"/api/evidence-revisions/{r.id}/").status_code == 403
++        assert client.post(f"/api/evidence-revisions/{r.id}/delete_attachment/").status_code == 403
++        assert _alive(e, r) == (True, True, True)
++
++    def test_contributor_still_adds_evidence(self, two_domains):
++        a, _ = two_domains
++        client = _client(_user_with("BI-RL-ANA", a, "ctb"))
++        resp = client.post("/api/evidences/", {"name": f"ctb add {uuid.uuid4().hex[:6]}", "folder": str(a.id)}, format="json")
++        assert resp.status_code == 201, resp.content
++
++    def test_refused_even_if_the_role_is_misconfigured(self, two_domains):
++        """Delete rights added back to the Analyst role: the server-side check still refuses."""
++        a, _ = two_domains
++        analyst = Role.objects.get(name="BI-RL-ANA")
++        analyst.permissions.add(*Permission.objects.filter(codename__in=EVIDENCE_DELETE_PERMISSIONS))
++        _assert_all_refused(_try_every_delete(_client(_user_with("BI-RL-ANA", a, "ctb")), a), "misconfigured contributor")
++
++    def test_custom_role_with_delete_rights_refused(self, two_domains):
++        a, _ = two_domains
++        custom = Role.objects.create(name=f"custom-{uuid.uuid4().hex[:6]}", folder=Folder.get_root_folder())
++        custom.permissions.set(
++            Permission.objects.filter(codename__in=("view_evidence", "view_evidencerevision", "view_folder") + EVIDENCE_DELETE_PERMISSIONS)
++        )
++        _assert_all_refused(_try_every_delete(_client(_user_with(custom.name, a, "custom")), a), "custom role")
++
++    @pytest.mark.parametrize(
++        "role",
++        ["BI-RL-AUD", "BI-RL-APP", RoleCodename.GOLDLINE_AUDITOR.value, "BI-RL-TPR", "BI-RL-ADE"],
++    )
++    def test_other_roles_refused(self, two_domains, role):
++        a, _ = two_domains
++        _assert_all_refused(_try_every_delete(_client(_user_with(role, a, "other")), a), role)
++
++
++@pytest.mark.django_db
++class TestAllowedRolesStillDelete:
++    def test_domain_manager_deletes_on_every_path(self, two_domains):
++        a, _ = two_domains
++        results = _try_every_delete(_client(_user_with("BI-RL-DMA", a, "dm")), a)
++        assert results["DELETE evidences/{id}/"] == (204, (False, False, False))
++        assert results["DELETE evidence-revisions/{id}/"][0] == 204
++        assert results["DELETE evidence-revisions/{id}/"][1][1:] == (False, False)
++        assert results["POST evidence-revisions/{id}/delete_attachment/"] == (200, (True, True, False))
++        assert results["POST evidences/batch-action/ delete"] == (200, (False, False, False))
++        assert results["POST evidence-revisions/batch-action/ delete"][0] == 200
++
++    def test_administrator_deletes(self, two_domains):
++        a, _ = two_domains
++        admin = User.objects.create_user(email=f"adm-{uuid.uuid4().hex[:6]}@tests.com", password=PASSWORD)
++        admin.user_groups.add(UserGroup.objects.get(name="BI-UG-ADM"))
++        client = _client(admin)
++        e, r = _evidence(a)
++        assert client.delete(f"/api/evidences/{e.id}/").status_code == 204
++        assert _alive(e, r) == (False, False, False)
++
++    def test_domain_group_membership_counts(self, two_domains):
++        """A domain manager through the domain's built-in group (how the screens assign it)."""
++        a, _ = two_domains
++        user = User.objects.create_user(email=f"dmg-{uuid.uuid4().hex[:6]}@tests.com", password=PASSWORD)
++        group = UserGroup.objects.get(folder=a, name="BI-UG-DMA")
++        user.user_groups.add(group)
++        e, r = _evidence(a)
++        assert _client(user).delete(f"/api/evidences/{e.id}/").status_code == 204
++
++    def test_contributor_group_membership_refused(self, two_domains):
++        a, _ = two_domains
++        user = User.objects.create_user(email=f"anag-{uuid.uuid4().hex[:6]}@tests.com", password=PASSWORD)
++        user.user_groups.add(UserGroup.objects.get(folder=a, name="BI-UG-ANA"))
++        _assert_all_refused(_try_every_delete(_client(user), a), "contributor by group")
++
++
++@pytest.mark.django_db
++class TestTenancy:
++    def test_contributor_in_b_cannot_delete_a(self, two_domains):
++        a, b = two_domains
++        client = _client(_user_with("BI-RL-ANA", b, "ctb-b"))
++        _assert_all_refused(_try_every_delete(client, a), "contributor in B on A")
++
++    def test_domain_manager_in_b_cannot_delete_a(self, two_domains):
++        a, b = two_domains
++        client = _client(_user_with("BI-RL-DMA", b, "dm-b"))
++        _assert_all_refused(_try_every_delete(client, a), "domain manager in B on A")
++
++    def test_check_is_per_domain(self, two_domains):
++        a, b = two_domains
++        dm_a = _user_with("BI-RL-DMA", a, "dm-a")
++        assert may_delete_evidence(dm_a, a) is True
++        assert may_delete_evidence(dm_a, b) is False
++        assert may_delete_evidence(dm_a, None) is False
++        assert may_delete_evidence(_user_with("BI-RL-ANA", a, "ctb-a"), a) is False
++
++    def test_inactive_domain_manager_refused(self, two_domains):
++        a, _ = two_domains
++        dm = _user_with("BI-RL-DMA", a, "dm-off")
++        dm.is_active = False
++        dm.save()
++        assert may_delete_evidence(dm, a) is False
++
++
++@pytest.mark.django_db
++class TestMigration:
++    def _perms(self, name):
++        return set(Role.objects.get(name=name).permissions.values_list("codename", flat=True))
++
++    def test_forward_removes_and_is_idempotent_reverse_restores(self, app_config):
++        targets = Permission.objects.filter(codename__in=EVIDENCE_DELETE_PERMISSIONS)
++        for name in MIGRATION.ROLES:
++            Role.objects.get(name=name).permissions.add(*targets)  # the state before goldline.12
++        MIGRATION.remove_evidence_delete(django_apps, None)
++        MIGRATION.remove_evidence_delete(django_apps, None)  # second run changes nothing
++        for name in MIGRATION.ROLES:
++            assert not self._perms(name) & set(EVIDENCE_DELETE_PERMISSIONS), name
++        assert set(EVIDENCE_DELETE_PERMISSIONS) <= self._perms("BI-RL-DMA")
++        assert set(EVIDENCE_DELETE_PERMISSIONS) <= self._perms("BI-RL-ADM")
++        MIGRATION.restore_evidence_delete(django_apps, None)
++        for name in MIGRATION.ROLES:
++            assert set(EVIDENCE_DELETE_PERMISSIONS) <= self._perms(name), name
++        MIGRATION.remove_evidence_delete(django_apps, None)
++        assert not self._perms("BI-RL-ANA") & set(EVIDENCE_DELETE_PERMISSIONS)
++
++    def test_migration_roles_match_the_module(self):
++        assert tuple(MIGRATION.ROLES) == ROLES_WITHOUT_EVIDENCE_DELETE
++        assert tuple(MIGRATION.PERMISSIONS) == EVIDENCE_DELETE_PERMISSIONS
+diff --git a/backend/core/views.py b/backend/core/views.py
+index 58cbdaa..3268b46 100644
+--- a/backend/core/views.py
++++ b/backend/core/views.py
+@@ -162,6 +162,8 @@ from rest_framework.request import Request
+ from rest_framework.response import Response
+ from rest_framework.utils.serializer_helpers import ReturnDict
+ from rest_framework.views import APIView
++from core import goldline_evidence_delete
++from core.goldline_evidence_delete import may_delete_evidence_object
+ from rest_framework.exceptions import (
+     NotFound,
+     PermissionDenied,
+@@ -11323,6 +11325,13 @@ class EvidenceViewSet(BaseModelViewSet):
+     model = Evidence
+     filterset_class = EvidenceFilterSet
+ 
++    def perform_destroy(self, instance):
++        # Goldline v4.1.1-goldline.12: only administrators and domain managers delete evidence,
++        # whatever the role definitions say (core/goldline_evidence_delete.py).
++        if not may_delete_evidence_object(self.request.user, instance):
++            raise PermissionDenied(goldline_evidence_delete.REFUSAL["detail"])
++        return super().perform_destroy(instance)
++
+     def get_queryset(self):
+         return (
+             super()
+@@ -11733,6 +11742,12 @@ class EvidenceRevisionViewSet(BaseModelViewSet):
+     filterset_fields = ["evidence"]
+     ordering = ["-version"]
+ 
++    def perform_destroy(self, instance):
++        # Goldline v4.1.1-goldline.12: see EvidenceViewSet.perform_destroy.
++        if not may_delete_evidence_object(self.request.user, instance):
++            raise PermissionDenied(goldline_evidence_delete.REFUSAL["detail"])
++        return super().perform_destroy(instance)
++
+     def get_queryset(self):
+         return (
+             super()
+@@ -11775,6 +11790,9 @@ class EvidenceRevisionViewSet(BaseModelViewSet):
+         response = Response(status=status.HTTP_403_FORBIDDEN)
+         if UUID(pk) in object_ids_delete:
+             evidence = self.get_object()
++            # Goldline v4.1.1-goldline.12: deleting the file is deleting evidence.
++            if not may_delete_evidence_object(request.user, evidence):
++                return goldline_evidence_delete.refused()
+             if evidence.attachment:
+                 evidence.attachment.delete()
+                 response = Response(status=status.HTTP_200_OK)
+diff --git a/backend/iam/migrations/0032_goldline_no_evidence_delete_for_contributors.py b/backend/iam/migrations/0032_goldline_no_evidence_delete_for_contributors.py
+new file mode 100644
+index 0000000..745a006
+--- /dev/null
++++ b/backend/iam/migrations/0032_goldline_no_evidence_delete_for_contributors.py
+@@ -0,0 +1,49 @@
++"""Goldline v4.1.1-goldline.12 (R-IAM-03; Director, 22 Nov 2026): contributors cannot delete evidence.
++
++Removes delete_evidence and delete_evidencerevision from the stored built-in Analyst (the role client
++contributors hold), third-party respondent and auditee roles. The start-up handler re-syncs built-in roles
++from core/startup.py, whose lists no longer carry these permissions, so this migration only makes the change
++take effect before the first start and records it in the migration history.
++
++Idempotent: removing a permission a role does not hold is a no-op, and a missing role or permission (a fresh
++database, where permissions are created after migrations) is skipped. Reversible: the reverse adds the two
++permissions back to the same roles (it restores the upstream defaults; the start-up handler would then remove
++them again unless core/startup.py is reverted too).
++"""
++
++from django.db import migrations
++
++ROLES = ("BI-RL-ANA", "BI-RL-TPR", "BI-RL-ADE")
++PERMISSIONS = ("delete_evidence", "delete_evidencerevision")
++
++
++def _targets(apps):
++    Role = apps.get_model("iam", "Role")
++    Permission = apps.get_model("auth", "Permission")
++    perms = list(Permission.objects.filter(content_type__app_label="core", codename__in=PERMISSIONS))
++    roles = list(Role.objects.filter(name__in=ROLES, builtin=True))
++    return roles, perms
++
++
++def remove_evidence_delete(apps, schema_editor):
++    roles, perms = _targets(apps)
++    for role in roles:
++        if perms:
++            role.permissions.remove(*perms)
++
++
++def restore_evidence_delete(apps, schema_editor):
++    roles, perms = _targets(apps)
++    for role in roles:
++        if perms:
++            role.permissions.add(*perms)
++
++
++class Migration(migrations.Migration):
++    dependencies = [
++        ("iam", "0031_remove_iam_is_published_fields"),
++        ("auth", "0012_alter_user_first_name_max_length"),
++        ("core", "0195_compliance_assessment_computed_values"),
++    ]
++
++    operations = [migrations.RunPython(remove_evidence_delete, restore_evidence_delete)]

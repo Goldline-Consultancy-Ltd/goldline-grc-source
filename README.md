@@ -25,6 +25,13 @@ Release v4.1.1-goldline.4 (November 2026) adds three access changes, recorded in
 
 The tests are in `backend/iam/tests/test_goldline_access.py`.
 
+Release v4.1.1-goldline.12 (November 2026), recorded in
+[`deploy/goldline-12-contributor-evidence-delete.patch`](deploy/goldline-12-contributor-evidence-delete.patch):
+only administrators and domain managers can delete evidence, an evidence revision or an evidence file. The Analyst,
+third-party respondent and auditee roles lose the two evidence delete permissions (role lists and migration
+`iam/0032`), and every evidence delete path also checks the caller's role on the evidence's domain
+(`backend/core/goldline_evidence_delete.py`). The tests are in `backend/core/tests/test_goldline_evidence_delete.py`.
+
 ## What is included
 
 The parts needed to build and run the application: `backend/`, `frontend/`, `cli/`, the Docker Compose files and their helper scripts, and the licence files. Upstream documentation, CI configuration and other non-build material are left out; they are available unchanged in the upstream repository. The `enterprise/` directory is not included: it is licensed separately by intuitem and is not used by this build.
