@@ -162,6 +162,8 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.utils.serializer_helpers import ReturnDict
 from rest_framework.views import APIView
+from core import goldline_evidence_delete
+from core.goldline_evidence_delete import may_delete_evidence_object
 from rest_framework.exceptions import (
     NotFound,
     PermissionDenied,
@@ -11323,6 +11325,13 @@ class EvidenceViewSet(BaseModelViewSet):
     model = Evidence
     filterset_class = EvidenceFilterSet
 
+    def perform_destroy(self, instance):
+        # Goldline v4.1.1-goldline.12: only administrators and domain managers delete evidence,
+        # whatever the role definitions say (core/goldline_evidence_delete.py).
+        if not may_delete_evidence_object(self.request.user, instance):
+            raise PermissionDenied(goldline_evidence_delete.REFUSAL["detail"])
+        return super().perform_destroy(instance)
+
     def get_queryset(self):
         return (
             super()
@@ -11733,6 +11742,12 @@ class EvidenceRevisionViewSet(BaseModelViewSet):
     filterset_fields = ["evidence"]
     ordering = ["-version"]
 
+    def perform_destroy(self, instance):
+        # Goldline v4.1.1-goldline.12: see EvidenceViewSet.perform_destroy.
+        if not may_delete_evidence_object(self.request.user, instance):
+            raise PermissionDenied(goldline_evidence_delete.REFUSAL["detail"])
+        return super().perform_destroy(instance)
+
     def get_queryset(self):
         return (
             super()
@@ -11775,6 +11790,9 @@ class EvidenceRevisionViewSet(BaseModelViewSet):
         response = Response(status=status.HTTP_403_FORBIDDEN)
         if UUID(pk) in object_ids_delete:
             evidence = self.get_object()
+            # Goldline v4.1.1-goldline.12: deleting the file is deleting evidence.
+            if not may_delete_evidence_object(request.user, evidence):
+                return goldline_evidence_delete.refused()
             if evidence.attachment:
                 evidence.attachment.delete()
                 response = Response(status=status.HTTP_200_OK)

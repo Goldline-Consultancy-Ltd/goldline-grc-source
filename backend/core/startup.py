@@ -396,6 +396,8 @@ APPROVER_PERMISSIONS_LIST = [
 ]
 
 ANALYST_PERMISSIONS_LIST = [
+    # Goldline v4.1.1-goldline.12: no evidence delete rights (delete_evidence,
+    # delete_evidencerevision); see core/goldline_evidence_delete.py.
     "view_customfielddefinition",
     "view_compliance_assessment_full",
     "view_object_audittrail",
@@ -454,7 +456,6 @@ ANALYST_PERMISSIONS_LIST = [
     "delete_complianceassessment",
     "delete_entity",
     "delete_entityassessment",
-    "delete_evidence",
     "delete_policy",
     "delete_perimeter",
     "delete_referencecontrol",
@@ -686,7 +687,6 @@ ANALYST_PERMISSIONS_LIST = [
     "add_evidencerevision",
     "view_evidencerevision",
     "change_evidencerevision",
-    "delete_evidencerevision",
     # document management
     "add_documentcontainer",
     "view_documentcontainer",
@@ -2023,6 +2023,8 @@ ADMINISTRATOR_PERMISSIONS_LIST = [
 ]
 
 THIRD_PARTY_RESPONDENT_PERMISSIONS_LIST = [
+    # Goldline v4.1.1-goldline.12: no evidence delete rights (delete_evidence,
+    # delete_evidencerevision); see core/goldline_evidence_delete.py.
     "view_complianceassessment",
     "view_requirementassessment",
     "change_requirementassessment",
@@ -2034,11 +2036,9 @@ THIRD_PARTY_RESPONDENT_PERMISSIONS_LIST = [
     "view_evidence",
     "add_evidence",
     "change_evidence",
-    "delete_evidence",
     "add_evidencerevision",
     "view_evidencerevision",
     "change_evidencerevision",
-    "delete_evidencerevision",
     "view_folder",
     "view_requirementassignment",
     "transition_requirementassignment",
@@ -2061,6 +2061,8 @@ THIRD_PARTY_RESPONDENT_PERMISSIONS_LIST = [
 ]
 
 AUDITEE_PERMISSIONS_LIST = [
+    # Goldline v4.1.1-goldline.12: no evidence delete rights (delete_evidence,
+    # delete_evidencerevision); see core/goldline_evidence_delete.py.
     "view_complianceassessment",
     "view_requirementassessment",
     "change_requirementassessment",
@@ -2073,11 +2075,9 @@ AUDITEE_PERMISSIONS_LIST = [
     "view_evidence",
     "add_evidence",
     "change_evidence",
-    "delete_evidence",
     "view_evidencerevision",
     "add_evidencerevision",
     "change_evidencerevision",
-    "delete_evidencerevision",
     "view_folder",
     "view_requirementassignment",
     "transition_requirementassignment",
