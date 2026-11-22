@@ -1,4 +1,5 @@
 import { fail, redirect, type Actions } from '@sveltejs/kit';
+import { blankSecrets } from '$lib/server/redact-secrets';
 import type { PageServerLoad } from './$types';
 import { ChangePasswordSchema } from '$lib/utils/schemas';
 import { setError, superValidate } from 'sveltekit-superforms';
@@ -17,7 +18,7 @@ export const actions: Actions = {
 	default: async (event) => {
 		const form = await superValidate(event.request, zod(ChangePasswordSchema));
 		if (!form.valid) {
-			return fail(400, { form });
+			return fail(400, { form: blankSecrets(form) });
 		}
 
 		const endpoint = `${BASE_API_URL}/iam/change-password/`;
@@ -28,6 +29,7 @@ export const actions: Actions = {
 		};
 
 		const res = await event.fetch(endpoint, requestInitOptions);
+		blankSecrets(form);
 
 		if (!res.ok) {
 			const response = await res.json();

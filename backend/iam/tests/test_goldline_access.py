@@ -297,12 +297,11 @@ class TestGoldlineAuditorRole:
     def test_cannot_export_outside_folder(self, auditor_setup):
         s = auditor_setup
         client = s["client"]
-        # The upstream assessment export answers 200 with a JSON "Permission denied" body instead of 403; what
-        # matters is that no archive and none of domain B's content comes back.
+        # Since goldline.6 (FND-260) the assessment export answers 403 (upstream answered 200 with the same body).
         resp = client.get(f"/api/compliance-assessments/{s['b']['assessment'].id}/export/")
-        assert resp.status_code in (200, 403, 404)
+        assert resp.status_code == 403
         assert resp.get("Content-Type", "").startswith("application/json"), "an archive was returned"
-        assert resp.json() == {"error": "Permission denied"} or resp.status_code in (403, 404)
+        assert resp.json() == {"error": "Permission denied"}
         assert s["b"]["assessment"].name.encode() not in resp.content
         for path in (
             f"/api/compliance-assessments/{s['b']['assessment'].id}/evidences_zip/",
@@ -340,3 +339,117 @@ class TestGoldlineAuditorRole:
         general = GlobalSettings.objects.get(name=GlobalSettings.Names.GENERAL)
         assert general.value.get("enforce_mfa") is True  # still on: the auditor could not switch it off
         assert client.post("/api/folders/", {"name": "new-domain"}, format="json").status_code == 403
+
+
+@pytest.mark.django_db
+class TestGoldlineFive:
+    """v4.1.1-goldline.5: no library identifiers in the auditor's export; editors keep them for re-import."""
+
+    def test_strip_library_identifiers(self):
+        from core.goldline_exports import strip_library_identifiers
+
+        row = {"urn": "urn:x:req:1", "ref_id": "1.1", "answers": "[urn:x:q:1] Yes\n[urn:x:q:2] No"}
+        out = strip_library_identifiers(row)
+        assert "urn" not in out and out["ref_id"] == "1.1" and out["answers"] == "Yes\nNo"
+        assert row["urn"] == "urn:x:req:1"  # the input is not changed
+
+    def test_auditor_xlsx_export_has_no_library_identifiers(self, auditor_setup):
+        import io
+
+        import openpyxl
+
+        s = auditor_setup
+        resp = s["client"].get(f"/api/compliance-assessments/{s['a']['assessment'].id}/xlsx/")
+        assert resp.status_code == 200
+        body = b"".join(resp.streaming_content) if getattr(resp, "streaming", False) else resp.content
+        sheet = openpyxl.load_workbook(io.BytesIO(body)).active
+        headers = [c.value for c in sheet[1]]
+        assert "urn" not in headers and "ref_id" in headers
+        assert not any("urn:" in str(c.value) for row in sheet.iter_rows() for c in row if c.value)
+
+    def test_editor_xlsx_export_keeps_identifiers(self, auditor_setup):
+        import io
+
+        import openpyxl
+
+        s = auditor_setup
+        admin = User.objects.create_superuser("editor@tests.com")
+        _give_mfa(admin)
+        resp = _token_client(admin).get(f"/api/compliance-assessments/{s['a']['assessment'].id}/xlsx/")
+        assert resp.status_code == 200
+        body = b"".join(resp.streaming_content) if getattr(resp, "streaming", False) else resp.content
+        headers = [c.value for c in openpyxl.load_workbook(io.BytesIO(body)).active[1]]
+        assert "urn" in headers
+
+    def test_other_domain_requirement_is_404_for_the_api(self, auditor_setup):
+        s = auditor_setup
+        r = s["client"].get(f"/api/requirement-assessments/{s['b']['requirement'].id}/")
+        assert r.status_code == 404  # the screen turns this into a clean 404 (frontend test)
+
+
+@pytest.mark.django_db
+class TestGoldlineSix:
+    """v4.1.1-goldline.6 (FND-260): export-type actions on another domain's record answer 403, not 200."""
+
+    @staticmethod
+    def _risk_assessment_in(domain):
+        from core.models import RiskAssessment, RiskMatrix
+        from test_fixtures import RISK_MATRIX_JSON_DEFINITION
+
+        matrix = RiskMatrix.objects.create(
+            name=f"rm-{domain.name}", json_definition=RISK_MATRIX_JSON_DEFINITION, folder=domain
+        )
+        perimeter = Perimeter.objects.create(name=f"rp-{domain.name}", folder=domain)
+        return RiskAssessment.objects.create(
+            name=f"ra-{domain.name}", perimeter=perimeter, risk_matrix=matrix, folder=domain
+        )
+
+    @staticmethod
+    def _paths(s):
+        ra_a, ra_b = (TestGoldlineSix._risk_assessment_in(s[d]) for d in ("domain_a", "domain_b"))
+        ca_a, ca_b = s["a"]["assessment"], s["b"]["assessment"]
+        own = [
+            (f"/api/compliance-assessments/{ca_a.id}/export/", ca_a.name),
+            (f"/api/compliance-assessments/{ca_a.id}/action_plan_pdf/", ca_a.name),
+            (f"/api/risk-assessments/{ra_a.id}/risk_assessment_pdf/", ra_a.name),
+            (f"/api/risk-assessments/{ra_a.id}/action_plan_pdf/", ra_a.name),
+        ]
+        other = [
+            (f"/api/compliance-assessments/{ca_b.id}/export/", ca_b.name),
+            (f"/api/compliance-assessments/{ca_b.id}/action_plan_pdf/", ca_b.name),
+            (f"/api/risk-assessments/{ra_b.id}/risk_assessment_pdf/", ra_b.name),
+            (f"/api/risk-assessments/{ra_b.id}/action_plan_pdf/", ra_b.name),
+        ]
+        return own, other
+
+    @staticmethod
+    def _body(resp):
+        return b"".join(resp.streaming_content) if getattr(resp, "streaming", False) else resp.content
+
+    def test_other_domain_exports_are_403_with_no_data(self, auditor_setup):
+        s = auditor_setup
+        _, other = self._paths(s)
+        for path, name in other:
+            resp = s["client"].get(path)
+            assert resp.status_code == 403, path
+            assert resp.get("Content-Type", "").startswith("application/json"), path
+            assert resp.json() == {"error": "Permission denied"}, path
+            assert name.encode() not in self._body(resp), path
+
+    def test_other_domain_neighbouring_exports_stay_403_or_404(self, auditor_setup):
+        s = auditor_setup
+        ca_b = s["b"]["assessment"]
+        for action in ("evidences_zip", "word_report", "xlsx", "compliance_assessment_csv", "posture-pdf"):
+            path = f"/api/compliance-assessments/{ca_b.id}/{action}/"
+            resp = s["client"].get(path)
+            assert resp.status_code in (403, 404, 405), (path, resp.status_code)
+            assert ca_b.name.encode() not in self._body(resp), path
+
+    def test_own_domain_exports_still_200(self, auditor_setup):
+        s = auditor_setup
+        own, _ = self._paths(s)
+        for path, _name in own:
+            resp = s["client"].get(path)
+            assert resp.status_code == 200, (path, resp.status_code)
+            assert not resp.get("Content-Type", "").startswith("application/json"), path
+            assert len(self._body(resp)) > 0, path

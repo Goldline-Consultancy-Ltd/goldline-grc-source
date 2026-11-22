@@ -161,3 +161,68 @@ class TestFormatGraphResult:
         assert "empty" not in result
         assert "null" not in result
         assert "blank" not in result
+
+
+class TestCacheIsJsonNotPickle:
+    """Goldline GRC FND-025: the knowledge graph disk cache is JSON; a pickle is never read."""
+
+    def _graph(self):
+        G = DiGraph()
+        G.add_node("fw", node_type="framework", name={"en": "Framework"}, ref_id="FW", assessable=False, depth=1)
+        G.add_node("r1", node_type="requirement_node", name="Req 1")
+        G.add_edge("fw", "r1", edge_type="has_requirement")
+        G.add_edge("r1", "t1", edge_type="addresses_threat")
+        G.add_edge("fw", "fw2", edge_type="has_mapping", mapping_urn="m1")
+        return G
+
+    def test_round_trip_is_exact(self, tmp_path, monkeypatch):
+        import chat.knowledge_graph as kg
+
+        monkeypatch.setattr(kg, "_CACHE_DIR", tmp_path)
+        monkeypatch.setattr(kg, "_CACHE_FILE", tmp_path / "knowledge_graph.json")
+        monkeypatch.setattr(kg, "_LEGACY_PICKLE_CACHE", tmp_path / "knowledge_graph.pkl")
+        monkeypatch.setattr(kg, "_get_library_mtime", lambda: 0.0)
+        G = self._graph()
+        kg._save_cache(G)
+        assert (tmp_path / "knowledge_graph.json").exists()
+        assert not list(tmp_path.glob("*.tmp"))
+        H = kg._load_or_build()
+        assert list(H.nodes(data=True)) == list(G.nodes(data=True))
+        for n in G.nodes():
+            assert list(H.out_edges(n, data=True)) == list(G.out_edges(n, data=True))
+            assert list(H.in_edges(n, data=True)) == list(G.in_edges(n, data=True))
+        assert H.number_of_edges() == G.number_of_edges()
+        # in-edge and out-edge attributes are the same objects, as add_edge leaves them
+        assert H._in["r1"]["fw"] is H._out["fw"]["r1"]
+
+    def test_pickle_cache_is_never_loaded(self, tmp_path, monkeypatch):
+        import pickle
+
+        import chat.knowledge_graph as kg
+
+        class Boom:
+            def __reduce__(self):
+                return (exec, ("raise SystemExit('pickle was loaded')",))
+
+        legacy = tmp_path / "knowledge_graph.pkl"
+        legacy.write_bytes(pickle.dumps(Boom()))
+        monkeypatch.setattr(kg, "_CACHE_DIR", tmp_path)
+        monkeypatch.setattr(kg, "_CACHE_FILE", tmp_path / "knowledge_graph.json")
+        monkeypatch.setattr(kg, "_LEGACY_PICKLE_CACHE", legacy)
+        monkeypatch.setattr(kg, "_build_graph", self._graph)
+        G = kg._load_or_build()  # must rebuild, not unpickle
+        assert G.number_of_nodes() == 4
+        assert not legacy.exists()  # the old pickle is removed once the JSON cache is written
+
+    def test_malformed_or_foreign_cache_is_rebuilt(self, tmp_path, monkeypatch):
+        import chat.knowledge_graph as kg
+
+        monkeypatch.setattr(kg, "_CACHE_DIR", tmp_path)
+        monkeypatch.setattr(kg, "_CACHE_FILE", tmp_path / "knowledge_graph.json")
+        monkeypatch.setattr(kg, "_LEGACY_PICKLE_CACHE", tmp_path / "knowledge_graph.pkl")
+        monkeypatch.setattr(kg, "_get_library_mtime", lambda: 0.0)
+        monkeypatch.setattr(kg, "_build_graph", self._graph)
+        (tmp_path / "knowledge_graph.json").write_text('{"format": "something-else", "nodes": {}}')
+        assert kg._load_or_build().number_of_nodes() == 4
+        (tmp_path / "knowledge_graph.json").write_text("not json")
+        assert kg._load_or_build().number_of_nodes() == 4

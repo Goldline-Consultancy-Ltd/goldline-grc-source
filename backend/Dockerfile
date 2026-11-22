@@ -98,8 +98,14 @@ RUN install -d /usr/share/fonts/truetype/carlito \
 # No `passwd` in the DHI base; installing it would pull shadow + PAM into the runtime.
 RUN echo 'app:x:1001:1001::/home/app:/bin/bash' >> /etc/passwd \
   && echo 'app:x:1001:' >> /etc/group \
-  && install -d -m 700 -o 1001 -g 1001 /home/app
-# USER app  # not activated by default to keep compatibility
+  && install -d -m 700 -o 1001 -g 1001 /home/app \
+  && install -d -o 1001 -g 1001 /code/db \
+  && chown -R 1001:1001 /code/db
+# Goldline GRC (FND-011, DS-0002): the backend and huey run as app (1001), not root. Everything the process writes is
+# under /code/db (SQLite, attachments, huey.db, secret key, knowledge graph cache) or the temporary directory. A host
+# bind mount on /code/db must be owned by 1001:1001 before this image starts (the platform setup step does
+# chown -R 1001:1001 on the host db directory; the earlier root images still read and write it, so rollback is safe).
+USER app
 
 EXPOSE 8000
 ENTRYPOINT ["uv", "run", "bash", "startup.sh"]

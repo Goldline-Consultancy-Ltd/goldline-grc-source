@@ -1,0 +1,335 @@
+diff --git a/backend/ciso_assistant/settings.py b/backend/ciso_assistant/settings.py
+index 227852f..88043a9 100644
+--- a/backend/ciso_assistant/settings.py
++++ b/backend/ciso_assistant/settings.py
+@@ -539,7 +539,22 @@ MIDDLEWARE = [
+     "core.custom_middleware.AuditlogMiddleware",
+     "allauth.account.middleware.AccountMiddleware",
+     "core.focus_middleware.FocusModeMiddleware",
++    # Goldline (v4.1.1-goldline.7, FND-254): shared limit on wrong second-factor codes (iam/goldline_mfa_limit.py)
++    "iam.goldline_mfa_limit.MFALimitMiddleware",
+ ]
++# Goldline (v4.1.1-goldline.7, FND-254): "default" is Django's own default (per-process memory, unchanged); the
++# second-factor limit counts in a file cache that every worker process of the container shares.
++CACHES = {
++    "default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"},
++    "goldline_ratelimit": {
++        "BACKEND": "django.core.cache.backends.filebased.FileBasedCache",
++        "LOCATION": os.path.join(
++            os.environ.get("TMPDIR", "/tmp"), "goldline-ratelimit"
++        ),
++        "TIMEOUT": 3600,
++        "OPTIONS": {"MAX_ENTRIES": 50000},
++    },
++}
+ ROOT_URLCONF = "ciso_assistant.urls"
+ # we leave these for the API UI tools - even if Django templates and Admin are not used anymore
+ LOGIN_REDIRECT_URL = "/api"
+diff --git a/backend/iam/goldline_mfa_limit.py b/backend/iam/goldline_mfa_limit.py
+new file mode 100644
+index 0000000..1e70a5b
+--- /dev/null
++++ b/backend/iam/goldline_mfa_limit.py
+@@ -0,0 +1,143 @@
++"""Goldline (v4.1.1-goldline.7, FND-254, R-SEC-02): repeated wrong second-factor codes are limited per user.
++
++The sign-in library already counts wrong codes, but in the process's own memory: the API runs several worker
++processes, each with its own count, so a run of wrong codes spread over the workers never reached the limit, and a
++reached limit answered 400 like any wrong code while the pending sign-in stayed open.
++
++This module adds a count that every worker shares (a file cache in the container's temporary directory, so no
++database change) and, once a user reaches the limit:
++  - every further code for that user is refused, right or wrong, until the window has passed;
++  - the sign-in step answers 429 (body unchanged apart from the status: code too_many_login_attempts on the code
++    field, which the sign-in screen already shows next to the field);
++  - the pending sign-in is closed, so the password has to be entered again (itself rate-limited).
++A correct code clears the user's count. The library's own per-process limit still applies on top.
++
++LIMIT failures within WINDOW_SECONDS lock the second factor for the rest of the window (sliding window).
++"""
++
++import json
++import re
++import time
++from importlib import import_module
++
++from django.conf import settings
++from django.core.cache import caches
++from django.http import JsonResponse
++
++# Defined in settings.CACHES (a file cache under the temporary directory, shared by the worker processes)
++CACHE_ALIAS = "goldline_ratelimit"
++LIMIT = 5
++WINDOW_SECONDS = 15 * 60
++ERROR_CODE = "too_many_login_attempts"
++
++# The second-factor step of a pending sign-in, for the app (token) and browser (cookie) clients
++AUTHENTICATE_PATH = re.compile(
++    r"^/api/_allauth/(app|browser)/v1/auth/2fa/authenticate/?$"
++)
++
++
++def _key(user) -> str:
++    return f"gl-mfa-fail-{user.pk}"
++
++
++def _recent(user, now: float) -> list:
++    return [
++        t for t in caches[CACHE_ALIAS].get(_key(user), []) if t > now - WINDOW_SECONDS
++    ]
++
++
++def is_locked(user, now: float | None = None) -> bool:
++    now = time.time() if now is None else now
++    return len(_recent(user, now)) >= LIMIT
++
++
++def record_attempt(user, now: float | None = None) -> None:
++    """Counts an attempt as failed until clear() says otherwise (a crash mid-check still counts)."""
++    now = time.time() if now is None else now
++    history = _recent(user, now)[-(LIMIT - 1) :] + [now]
++    caches[CACHE_ALIAS].set(_key(user), history, WINDOW_SECONDS)
++
++
++def clear(user) -> None:
++    caches[CACHE_ALIAS].delete(_key(user))
++
++
++def wrap_check_rate_limit(original):
++    """Wraps allauth's check_rate_limit(user, error_key=None) -> clear callback with the shared per-user count."""
++
++    def check_rate_limit(user, error_key=None):
++        from allauth.account.adapter import get_adapter
++
++        if is_locked(user):
++            raise get_adapter().validation_error(error_key or ERROR_CODE)
++        clear_original = original(user, error_key=error_key)
++        record_attempt(user)
++
++        def clear_all():
++            clear(user)
++            clear_original()
++
++        return clear_all
++
++    check_rate_limit.goldline_wrapped = True
++    check_rate_limit.goldline_original = original
++    return check_rate_limit
++
++
++def install() -> None:
++    """Replaces check_rate_limit in each allauth module that imported it by name. Safe to call more than once."""
++    for name in (
++        "allauth.mfa.base.internal.flows",
++        "allauth.mfa.base.forms",
++        "allauth.mfa.totp.forms",
++        "allauth.mfa.webauthn.forms",
++    ):
++        module = import_module(name)
++        current = module.check_rate_limit
++        if not getattr(current, "goldline_wrapped", False):
++            module.check_rate_limit = wrap_check_rate_limit(current)
++
++
++def _is_limit_response(response) -> bool:
++    if response.status_code != 400 or "json" not in response.get("Content-Type", ""):
++        return False
++    try:
++        body = json.loads(response.content)
++    except ValueError:
++        return False
++    return any(
++        isinstance(e, dict) and e.get("code") == ERROR_CODE
++        for e in body.get("errors", [])
++    )
++
++
++def _close_pending_sign_in(request) -> None:
++    token = request.headers.get("X-Session-Token")
++    if token:
++        engine = import_module(settings.SESSION_ENGINE)
++        engine.SessionStore(session_key=token).delete()
++    elif hasattr(request, "session"):
++        request.session.flush()
++
++
++class MFALimitMiddleware:
++    """On the second-factor step: a reached limit answers 429 and closes the pending sign-in."""
++
++    def __init__(self, get_response):
++        self.get_response = get_response
++        install()
++
++    def __call__(self, request):
++        response = self.get_response(request)
++        if (
++            request.method == "POST"
++            and AUTHENTICATE_PATH.match(request.path)
++            and _is_limit_response(response)
++        ):
++            body = json.loads(response.content)
++            body["status"] = 429
++            _close_pending_sign_in(request)
++            limited = JsonResponse(body, status=429)
++            limited["Retry-After"] = str(WINDOW_SECONDS)
++            return limited
++        return response
+diff --git a/backend/iam/tests/test_goldline_mfa_limit.py b/backend/iam/tests/test_goldline_mfa_limit.py
+new file mode 100644
+index 0000000..814fd06
+--- /dev/null
++++ b/backend/iam/tests/test_goldline_mfa_limit.py
+@@ -0,0 +1,153 @@
++"""Goldline v4.1.1-goldline.7 (FND-254, R-SEC-02): wrong second-factor codes are limited per user, across workers.
++
++Each test creates its own user in the test database; nothing here touches a real instance.
++"""
++
++import pytest
++from allauth.mfa.totp.internal.auth import (
++    TOTP,
++    format_hotp_value,
++    generate_totp_secret,
++    hotp_value,
++    yield_hotp_counters_from_time,
++)
++from django.core.cache import caches
++from django.test import Client
++
++from iam import goldline_mfa_limit as limit
++from iam.models import User
++
++PASSWORD = "Goldline-test-pw-1A!"
++LOGIN = "/api/_allauth/app/v1/auth/login"
++MFA = "/api/_allauth/app/v1/auth/2fa/authenticate"
++
++
++@pytest.fixture(autouse=True)
++def fresh_counts():
++    caches[limit.CACHE_ALIAS].clear()
++    caches["default"].clear()
++    limit.install()
++    yield
++    caches[limit.CACHE_ALIAS].clear()
++
++
++def _user_with_totp(email):
++    user = User.objects.create_user(email=email, password=PASSWORD)
++    secret = generate_totp_secret()
++    TOTP.activate(user, secret)
++    return user, secret
++
++
++def _current_code(secret):
++    return format_hotp_value(hotp_value(secret, next(yield_hotp_counters_from_time())))
++
++
++def _wrong_code(secret, i):
++    right = _current_code(secret)
++    code = str(100000 + i)
++    return code if code != right else str(200000 + i)
++
++
++def _pending_sign_in(client, email):
++    r = client.post(
++        LOGIN, {"email": email, "password": PASSWORD}, content_type="application/json"
++    )
++    assert r.status_code == 401, r.content
++    return r.json()["meta"]["session_token"]
++
++
++def _mfa(client, token, code):
++    return client.post(
++        MFA, {"code": code}, content_type="application/json", HTTP_X_SESSION_TOKEN=token
++    )
++
++
++@pytest.mark.django_db
++class TestSecondFactorLimit:
++    def test_repeated_wrong_codes_answer_429_and_close_the_sign_in(self):
++        user, secret = _user_with_totp("mfa-limit@tests.com")
++        client = Client()
++        token = _pending_sign_in(client, user.email)
++        statuses = [
++            _mfa(client, token, _wrong_code(secret, i)).status_code for i in range(12)
++        ]
++        assert statuses[: limit.LIMIT] == [400] * limit.LIMIT, statuses
++        assert statuses[limit.LIMIT] == 429, statuses
++        # The pending sign-in is closed: the same session cannot try again
++        assert all(s in (401, 409, 410, 429) for s in statuses[limit.LIMIT + 1 :]), (
++            statuses
++        )
++
++    def test_limit_response_keeps_the_error_shape_the_screen_reads(self):
++        user, secret = _user_with_totp("mfa-limit-shape@tests.com")
++        client = Client()
++        token = _pending_sign_in(client, user.email)
++        for i in range(limit.LIMIT):
++            _mfa(client, token, _wrong_code(secret, i))
++        r = _mfa(client, token, _wrong_code(secret, 99))
++        assert r.status_code == 429
++        body = r.json()
++        assert body["status"] == 429
++        assert {"code": limit.ERROR_CODE, "param": "code"}.items() <= body["errors"][
++            0
++        ].items()
++        assert r["Retry-After"] == str(limit.WINDOW_SECONDS)
++
++    def test_new_sign_in_does_not_reset_the_count_and_right_code_is_refused_while_locked(
++        self,
++    ):
++        user, secret = _user_with_totp("mfa-limit-relogin@tests.com")
++        client = Client()
++        token = _pending_sign_in(client, user.email)
++        for i in range(limit.LIMIT):
++            _mfa(client, token, _wrong_code(secret, i))
++        token2 = _pending_sign_in(Client(), user.email)
++        r = _mfa(Client(), token2, _current_code(secret))
++        assert r.status_code == 429
++        assert "access_token" not in r.json().get("meta", {})
++
++    def test_count_is_shared_not_per_process(self):
++        # Simulates another worker: the library's own per-process count is empty, the shared count is not
++        user, secret = _user_with_totp("mfa-limit-shared@tests.com")
++        for _ in range(limit.LIMIT):
++            limit.record_attempt(user)
++        caches["default"].clear()
++        token = _pending_sign_in(Client(), user.email)
++        assert _mfa(Client(), token, _current_code(secret)).status_code == 429
++
++    def test_right_code_clears_the_count(self):
++        user, secret = _user_with_totp("mfa-limit-clear@tests.com")
++        client = Client()
++        token = _pending_sign_in(client, user.email)
++        for i in range(limit.LIMIT - 1):
++            assert _mfa(client, token, _wrong_code(secret, i)).status_code == 400
++        r = _mfa(client, token, _current_code(secret))
++        assert r.status_code == 200, r.content
++        assert not limit.is_locked(user)
++        assert caches[limit.CACHE_ALIAS].get(f"gl-mfa-fail-{user.pk}") is None
++
++    def test_window_slides(self):
++        user, _ = _user_with_totp("mfa-limit-window@tests.com")
++        start = 1_800_000_000.0
++        for i in range(limit.LIMIT):
++            limit.record_attempt(user, now=start + i)
++        assert limit.is_locked(user, now=start + limit.LIMIT)
++        assert not limit.is_locked(user, now=start + limit.WINDOW_SECONDS + 1)
++
++    def test_users_are_counted_separately(self):
++        a, _ = _user_with_totp("mfa-limit-a@tests.com")
++        b, _ = _user_with_totp("mfa-limit-b@tests.com")
++        for _ in range(limit.LIMIT):
++            limit.record_attempt(a)
++        assert limit.is_locked(a)
++        assert not limit.is_locked(b)
++
++    def test_install_is_idempotent(self):
++        from allauth.mfa.base import forms
++
++        limit.install()
++        limit.install()
++        assert forms.check_rate_limit.goldline_wrapped
++        assert not getattr(
++            forms.check_rate_limit.goldline_original, "goldline_wrapped", False
++        )

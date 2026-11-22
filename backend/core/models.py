@@ -6463,6 +6463,24 @@ class EvidenceRevision(AbstractBaseModel, FolderMixin):
     def __str__(self):
         return f"{self.evidence.name} v{self.version}"
 
+    def clean(self) -> None:
+        # Goldline (v4.1.1-goldline.8): a new attachment is checked by content and the 25 MB limit.
+        from core.goldline_uploads import check_evidence_upload
+
+        errors = {}
+        try:
+            check_evidence_upload(self.attachment)
+        except ValidationError as e:
+            errors["attachment"] = e.messages
+        try:
+            super().clean()
+        except ValidationError as e:
+            if not errors:
+                raise
+            errors.update(getattr(e, "message_dict", {"__all__": e.messages}))
+        if errors:
+            raise ValidationError(errors)
+
     def save(self, *args, **kwargs):
         # Set folder to match the evidence's folder
         if hasattr(self.evidence, "folder") and self.evidence.folder:

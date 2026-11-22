@@ -1,0 +1,156 @@
+diff --git a/backend/core/goldline_exports.py b/backend/core/goldline_exports.py
+new file mode 100644
+index 0000000..1be8bd7
+--- /dev/null
++++ b/backend/core/goldline_exports.py
+@@ -0,0 +1,13 @@
++"""Goldline (v4.1.1-goldline.5): exports for read-only users leave out the libraries' internal identifiers."""
++
++import re
++
++_PREFIX = re.compile(r"\[urn:[^\]]*\]\s*")
++
++
++def strip_library_identifiers(entry: dict) -> dict:
++    """The row without the "urn" column, and without "[urn:...]" prefixes in the answers cell."""
++    out = {k: v for k, v in entry.items() if k != "urn"}
++    if isinstance(out.get("answers"), str):
++        out["answers"] = _PREFIX.sub("", out["answers"])
++    return out
+diff --git a/backend/core/views.py b/backend/core/views.py
+index 8463e82..cf89a4b 100644
+--- a/backend/core/views.py
++++ b/backend/core/views.py
+@@ -13198,6 +13198,17 @@ class ComplianceAssessmentViewSet(XRaysMixin, BaseModelViewSet):
+ 
+             entries.append(entry)
+ 
++        # Goldline (v4.1.1-goldline.5): read-only users (the Goldline auditor role) get the export without the
++        # libraries' internal identifiers; people who can change the assessment keep them (re-import needs them).
++        if not RoleAssignment.is_access_allowed(
++            user=request.user,
++            perm=Permission.objects.get(codename="change_requirementassessment"),
++            folder=audit.folder,
++        ):
++            from core.goldline_exports import strip_library_identifiers
++
++            entries = [strip_library_identifiers(e) for e in entries]
++
+         df = pd.DataFrame(entries)
+         buffer = io.BytesIO()
+ 
+diff --git a/backend/iam/tests/test_goldline_access.py b/backend/iam/tests/test_goldline_access.py
+index 94a0670..a78363f 100644
+--- a/backend/iam/tests/test_goldline_access.py
++++ b/backend/iam/tests/test_goldline_access.py
+@@ -340,3 +340,49 @@ class TestGoldlineAuditorRole:
+         general = GlobalSettings.objects.get(name=GlobalSettings.Names.GENERAL)
+         assert general.value.get("enforce_mfa") is True  # still on: the auditor could not switch it off
+         assert client.post("/api/folders/", {"name": "new-domain"}, format="json").status_code == 403
++
++
++@pytest.mark.django_db
++class TestGoldlineFive:
++    """v4.1.1-goldline.5: no library identifiers in the auditor's export; editors keep them for re-import."""
++
++    def test_strip_library_identifiers(self):
++        from core.goldline_exports import strip_library_identifiers
++
++        row = {"urn": "urn:x:req:1", "ref_id": "1.1", "answers": "[urn:x:q:1] Yes\n[urn:x:q:2] No"}
++        out = strip_library_identifiers(row)
++        assert "urn" not in out and out["ref_id"] == "1.1" and out["answers"] == "Yes\nNo"
++        assert row["urn"] == "urn:x:req:1"  # the input is not changed
++
++    def test_auditor_xlsx_export_has_no_library_identifiers(self, auditor_setup):
++        import io
++
++        import openpyxl
++
++        s = auditor_setup
++        resp = s["client"].get(f"/api/compliance-assessments/{s['a']['assessment'].id}/xlsx/")
++        assert resp.status_code == 200
++        body = b"".join(resp.streaming_content) if getattr(resp, "streaming", False) else resp.content
++        sheet = openpyxl.load_workbook(io.BytesIO(body)).active
++        headers = [c.value for c in sheet[1]]
++        assert "urn" not in headers and "ref_id" in headers
++        assert not any("urn:" in str(c.value) for row in sheet.iter_rows() for c in row if c.value)
++
++    def test_editor_xlsx_export_keeps_identifiers(self, auditor_setup):
++        import io
++
++        import openpyxl
++
++        s = auditor_setup
++        admin = User.objects.create_superuser("editor@tests.com")
++        _give_mfa(admin)
++        resp = _token_client(admin).get(f"/api/compliance-assessments/{s['a']['assessment'].id}/xlsx/")
++        assert resp.status_code == 200
++        body = b"".join(resp.streaming_content) if getattr(resp, "streaming", False) else resp.content
++        headers = [c.value for c in openpyxl.load_workbook(io.BytesIO(body)).active[1]]
++        assert "urn" in headers
++
++    def test_other_domain_requirement_is_404_for_the_api(self, auditor_setup):
++        s = auditor_setup
++        r = s["client"].get(f"/api/requirement-assessments/{s['b']['requirement'].id}/")
++        assert r.status_code == 404  # the screen turns this into a clean 404 (frontend test)
+diff --git a/frontend/src/routes/(app)/(third-party)/requirement-assessments/[id=uuid]/+page.server.ts b/frontend/src/routes/(app)/(third-party)/requirement-assessments/[id=uuid]/+page.server.ts
+index 002f1b2..295a076 100644
+--- a/frontend/src/routes/(app)/(third-party)/requirement-assessments/[id=uuid]/+page.server.ts
++++ b/frontend/src/routes/(app)/(third-party)/requirement-assessments/[id=uuid]/+page.server.ts
+@@ -1,4 +1,5 @@
+ import type { PageServerLoad } from './$types';
++import { error } from '@sveltejs/kit';
+ 
+ import { BASE_API_URL } from '$lib/utils/constants';
+ import { type TableSource } from '$lib/components/ModelTable/types';
+@@ -9,7 +10,14 @@ import type { urlModel } from '$lib/utils/types';
+ export const load = (async ({ fetch, params }) => {
+ 	const URLModel = 'requirement-assessments';
+ 	const baseEndpoint = `${BASE_API_URL}/${URLModel}/${params.id}/`;
+-	const requirementAssessment = await fetch(baseEndpoint).then((res) => res.json());
++	// Goldline (v4.1.1-goldline.5): a requirement the user may not see (another domain, or no such id) is a clean 404,
++	// never a server error, and nothing of it is read.
++	const requirementResponse = await fetch(baseEndpoint);
++	if (!requirementResponse.ok) {
++		await discardBody(requirementResponse);
++		error(404, 'Not found');
++	}
++	const requirementAssessment = await requirementResponse.json();
+ 	const complianceAssessmentScore = await fetch(
+ 		`${BASE_API_URL}/compliance-assessments/${requirementAssessment.compliance_assessment.id}/global_score/`
+ 	).then((res) => res.json());
+diff --git a/frontend/src/routes/(app)/(third-party)/requirement-assessments/[id=uuid]/+page.svelte b/frontend/src/routes/(app)/(third-party)/requirement-assessments/[id=uuid]/+page.svelte
+index 2228a07..0e522f3 100644
+--- a/frontend/src/routes/(app)/(third-party)/requirement-assessments/[id=uuid]/+page.svelte
++++ b/frontend/src/routes/(app)/(third-party)/requirement-assessments/[id=uuid]/+page.svelte
+@@ -116,7 +116,8 @@
+ 
+ <div class="card space-y-2 p-4 bg-surface-50-950 shadow-sm">
+ 	<div class="flex flex-row space-x-2 items-center">
+-		<code>{data.requirement.urn}</code>
++		<!-- Goldline (v4.1.1-goldline.5): the requirement's own reference, not the library's internal identifier -->
++		{#if data.requirement.ref_id}<code>{data.requirement.ref_id}</code>{/if}
+ 		{#if showStatus}
+ 			<span
+ 				class="badge h-fit"
+diff --git a/frontend/src/routes/(app)/(third-party)/requirement-assessments/[id=uuid]/page.server.test.ts b/frontend/src/routes/(app)/(third-party)/requirement-assessments/[id=uuid]/page.server.test.ts
+new file mode 100644
+index 0000000..3523161
+--- /dev/null
++++ b/frontend/src/routes/(app)/(third-party)/requirement-assessments/[id=uuid]/page.server.test.ts
+@@ -0,0 +1,15 @@
++// Goldline (v4.1.1-goldline.5): a requirement the user may not see is a clean 404, never a server error.
++import { describe, expect, it } from 'vitest';
++import { load } from './+page.server';
++
++const notFound = async () => new Response(JSON.stringify({ detail: 'Not found.' }), { status: 404 });
++const forbidden = async () => new Response(JSON.stringify({ detail: 'Forbidden' }), { status: 403 });
++
++describe('requirement page of another domain', () => {
++	it('answers 404 when the API says not found', async () => {
++		await expect(load({ fetch: notFound, params: { id: '00000000-0000-0000-0000-000000000000' } } as never)).rejects.toMatchObject({ status: 404 });
++	});
++	it('answers 404 when the API refuses access', async () => {
++		await expect(load({ fetch: forbidden, params: { id: '00000000-0000-0000-0000-000000000000' } } as never)).rejects.toMatchObject({ status: 404 });
++	});
++});

@@ -1,0 +1,620 @@
+diff --git a/backend/core/goldline_uploads.py b/backend/core/goldline_uploads.py
+new file mode 100644
+index 0000000..6676e97
+--- /dev/null
++++ b/backend/core/goldline_uploads.py
+@@ -0,0 +1,166 @@
++"""Goldline (v4.1.1-goldline.8): evidence uploads are checked by content, not only by file name.
++
++Refused, whatever the file is called:
++- executables and scripts: Windows (MZ), Linux (ELF), macOS (Mach-O, thin and fat), Java class files, WebAssembly,
++  Windows shortcuts (.lnk) and any file that starts with "#!";
++- content that does not match the declared type (the file name's extension, and the content type the client sent);
++- files over 25 MB (the Director's limit, 20 Nov 2026, the same as the workspace).
++
++Only a new upload is read; a file already stored is not read again.
++"""
++
++from __future__ import annotations
++
++import mimetypes
++import os
++
++from django.core.exceptions import ValidationError
++from django.core.files.uploadedfile import UploadedFile
++
++EVIDENCE_MAX_BYTES = 25 * 1024 * 1024
++_HEAD = 64 * 1024
++
++_EXECUTABLE_SIGNATURES: tuple[tuple[bytes, str], ...] = (
++    (b"MZ", "a Windows executable"),
++    (b"\x7fELF", "a Linux executable"),
++    (b"\xfe\xed\xfa\xce", "a macOS executable"),
++    (b"\xfe\xed\xfa\xcf", "a macOS executable"),
++    (b"\xce\xfa\xed\xfe", "a macOS executable"),
++    (b"\xcf\xfa\xed\xfe", "a macOS executable"),
++    (b"\xca\xfe\xba\xbe", "a macOS executable or Java class file"),
++    (b"\xca\xfe\xba\xbf", "a macOS executable"),
++    (b"\x00asm", "a WebAssembly module"),
++    (b"L\x00\x00\x00\x01\x14\x02\x00", "a Windows shortcut"),
++    (b"#!", "a script"),
++)
++
++_EXECUTABLE_CONTENT_TYPES = {
++    "application/x-msdownload",
++    "application/x-msdos-program",
++    "application/x-dosexec",
++    "application/vnd.microsoft.portable-executable",
++    "application/x-executable",
++    "application/x-elf",
++    "application/x-mach-binary",
++    "application/x-sharedlib",
++    "application/x-sh",
++    "application/x-shellscript",
++    "text/x-shellscript",
++    "application/x-csh",
++    "application/x-perl",
++    "text/x-perl",
++    "text/x-python",
++    "application/x-python-code",
++    "application/java-vm",
++    "application/x-java-applet",
++    "application/java-archive",
++    "application/x-java-archive",
++    "application/wasm",
++    "application/x-ms-shortcut",
++    "application/x-bat",
++    "application/x-msi",
++    "application/x-ms-installer",
++}
++
++_OLE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
++_ZIP = (b"PK\x03\x04", b"PK\x05\x06")
++_MEDIA_BOXES = (b"ftyp", b"moov", b"mdat", b"wide", b"free", b"skip", b"pnot")
++
++# Binary formats: the content must start with one of these (or match the check).
++_BINARY_CHECKS = {
++    "pdf": lambda h: h.startswith(b"%PDF-"),
++    "png": lambda h: h.startswith(b"\x89PNG\r\n\x1a\n"),
++    "jpg": lambda h: h.startswith(b"\xff\xd8\xff"),
++    "jpeg": lambda h: h.startswith(b"\xff\xd8\xff"),
++    "gif": lambda h: h.startswith((b"GIF87a", b"GIF89a")),
++    "webp": lambda h: h[:4] == b"RIFF" and h[8:12] == b"WEBP",
++    "docx": lambda h: h.startswith(_ZIP),
++    "xlsx": lambda h: h.startswith(_ZIP),
++    "pptx": lambda h: h.startswith(_ZIP),
++    "odt": lambda h: h.startswith(_ZIP),
++    "ods": lambda h: h.startswith(_ZIP),
++    "zip": lambda h: h.startswith(_ZIP),
++    "doc": lambda h: h.startswith(_OLE),
++    "xls": lambda h: h.startswith(_OLE),
++    "ppt": lambda h: h.startswith(_OLE),
++    "msg": lambda h: h.startswith(_OLE),
++    "7z": lambda h: h.startswith(b"7z\xbc\xaf\x27\x1c"),
++    "gz": lambda h: h.startswith(b"\x1f\x8b"),
++    "tar": lambda h: h[257:262] == b"ustar",
++    "mp4": lambda h: h[4:8] in _MEDIA_BOXES,
++    "mov": lambda h: h[4:8] in _MEDIA_BOXES,
++}
++
++# Text formats: no NUL byte and no binary signature in the first 64 KB.
++_TEXT_EXTENSIONS = {"txt", "csv", "md", "json", "yaml", "yml", "toml", "xml", "log", "eml", "svg"}
++
++_BINARY_MAGIC = (b"%PDF-", b"\x89PNG", b"\xff\xd8\xff", b"GIF8", *_ZIP, _OLE, b"7z\xbc\xaf", b"\x1f\x8b")
++
++# A client-declared content type that names one of these formats must agree with the extension.
++_STRICT_DECLARED = {
++    "application/pdf": {"pdf"},
++    "image/png": {"png"},
++    "image/jpeg": {"jpg", "jpeg"},
++    "image/gif": {"gif"},
++    "image/webp": {"webp"},
++    "video/mp4": {"mp4"},
++    "video/quicktime": {"mov"},
++    "application/zip": {"zip", "docx", "xlsx", "pptx", "odt", "ods"},
++}
++
++
++def _upload_of(value):
++    """The new upload behind a validator value, or None when the file is already stored."""
++    if isinstance(value, UploadedFile):
++        return value
++    if getattr(value, "_committed", True) is False:
++        inner = getattr(value, "file", None)
++        return inner if inner is not None else value
++    return None
++
++
++def _head(upload) -> bytes:
++    pos = upload.tell() if hasattr(upload, "tell") else 0
++    upload.seek(0)
++    head = upload.read(_HEAD)
++    upload.seek(pos)
++    return head or b""
++
++
++def check_evidence_upload(value) -> None:
++    """Raise ValidationError when a new evidence file is too large, executable or not what it says it is."""
++    upload = _upload_of(value)
++    if upload is None:
++        return
++
++    size = getattr(upload, "size", None)
++    if size is not None and size > EVIDENCE_MAX_BYTES:
++        raise ValidationError("The file is larger than 25 MB, the maximum for evidence.")
++
++    name = getattr(value, "name", None) or getattr(upload, "name", "") or ""
++    extension = os.path.splitext(name)[1].lstrip(".").lower()
++    declared = (getattr(upload, "content_type", None) or "").split(";")[0].strip().lower()
++    head = _head(upload)
++
++    if declared in _EXECUTABLE_CONTENT_TYPES:
++        raise ValidationError("Executable files are not accepted as evidence.")
++    for signature, what in _EXECUTABLE_SIGNATURES:
++        if head.startswith(signature):
++            raise ValidationError(f"The file looks like {what}; executable files are not accepted as evidence.")
++
++    if declared in _STRICT_DECLARED and extension not in _STRICT_DECLARED[declared]:
++        raise ValidationError("The file's declared type does not match its name.")
++
++    if not head:
++        return  # an empty file holds nothing to check
++    check = _BINARY_CHECKS.get(extension)
++    if check is not None:
++        if not check(head):
++            raise ValidationError(f"The file's content does not match its type (.{extension}).")
++    elif extension in _TEXT_EXTENSIONS:
++        if b"\x00" in head or head.startswith(_BINARY_MAGIC):
++            raise ValidationError(f"The file's content does not match its type (.{extension}).")
++    else:
++        guessed = mimetypes.guess_type(name)[0]
++        if guessed is None:
++            raise ValidationError("The file's type is not recognised.")
+diff --git a/backend/core/models.py b/backend/core/models.py
+index 248dbd3..9467a33 100644
+--- a/backend/core/models.py
++++ b/backend/core/models.py
+@@ -6463,6 +6463,24 @@ class EvidenceRevision(AbstractBaseModel, FolderMixin):
+     def __str__(self):
+         return f"{self.evidence.name} v{self.version}"
+ 
++    def clean(self) -> None:
++        # Goldline (v4.1.1-goldline.8): a new attachment is checked by content and the 25 MB limit.
++        from core.goldline_uploads import check_evidence_upload
++
++        errors = {}
++        try:
++            check_evidence_upload(self.attachment)
++        except ValidationError as e:
++            errors["attachment"] = e.messages
++        try:
++            super().clean()
++        except ValidationError as e:
++            if not errors:
++                raise
++            errors.update(getattr(e, "message_dict", {"__all__": e.messages}))
++        if errors:
++            raise ValidationError(errors)
++
+     def save(self, *args, **kwargs):
+         # Set folder to match the evidence's folder
+         if hasattr(self.evidence, "folder") and self.evidence.folder:
+diff --git a/backend/core/serializers.py b/backend/core/serializers.py
+index a8ad6ba..ae44af6 100644
+--- a/backend/core/serializers.py
++++ b/backend/core/serializers.py
+@@ -3382,6 +3382,20 @@ class EvidenceWriteSerializer(BaseModelSerializer):
+         model = Evidence
+         fields = "__all__"
+ 
++    def validate_attachment(self, value):
++        # Goldline (v4.1.1-goldline.8): the same checks as an evidence revision's attachment (name, size, content).
++        from core.goldline_uploads import check_evidence_upload
++        from core.validators import validate_file_name, validate_file_size
++
++        if value:
++            try:
++                validate_file_size(value)
++                validate_file_name(value)
++                check_evidence_upload(value)
++            except DjangoValidationError as e:
++                raise serializers.ValidationError(e.messages)
++        return value
++
+     def create(self, validated_data):
+         attachment = validated_data.pop("attachment", None)
+         link = validated_data.pop("link", None)
+@@ -3482,6 +3496,17 @@ class EvidenceRevisionWriteSerializer(BaseModelSerializer):
+         fields = "__all__"
+         read_only_fields = ["version"]
+ 
++    def validate_attachment(self, value):
++        # Goldline (v4.1.1-goldline.8): content and 25 MB checks on top of the model's name and size validators.
++        from core.goldline_uploads import check_evidence_upload
++
++        if value:
++            try:
++                check_evidence_upload(value)
++            except DjangoValidationError as e:
++                raise serializers.ValidationError(e.messages)
++        return value
++
+     def validate(self, attrs):
+         attrs = super().validate(attrs)
+         # The submitted folder is decorative: EvidenceRevision.save() replaces it
+diff --git a/backend/core/tests/test_goldline_evidence_uploads.py b/backend/core/tests/test_goldline_evidence_uploads.py
+new file mode 100644
+index 0000000..72866f9
+--- /dev/null
++++ b/backend/core/tests/test_goldline_evidence_uploads.py
+@@ -0,0 +1,181 @@
++"""Goldline v4.1.1-goldline.8: evidence uploads are refused by content (executables, mismatched type) and over 25 MB.
++
++TC-SR-027 (executable) and TC-SR-028 (over the size limit) test the same through the API on the test copy.
++"""
++
++import pytest
++from django.core.exceptions import ValidationError
++from django.core.files.uploadedfile import SimpleUploadedFile
++from iam.models import Folder, User, UserGroup
++from knox.models import AuthToken
++from rest_framework import status
++from rest_framework.test import APIClient
++
++from core.apps import startup
++from core.goldline_uploads import EVIDENCE_MAX_BYTES, check_evidence_upload
++from core.models import Evidence, EvidenceRevision
++
++EXECUTABLES = {
++    "windows": b"MZ" + b"\x00" * 510,
++    "linux": b"\x7fELF\x02\x01\x01" + b"\x00" * 64,
++    "macos-64": b"\xcf\xfa\xed\xfe" + b"\x00" * 64,
++    "macos-32": b"\xce\xfa\xed\xfe" + b"\x00" * 64,
++    "macos-fat-or-java-class": b"\xca\xfe\xba\xbe" + b"\x00" * 64,
++    "webassembly": b"\x00asm\x01\x00\x00\x00",
++    "windows-shortcut": b"L\x00\x00\x00\x01\x14\x02\x00" + b"\x00" * 64,
++    "shell-script": b"#!/bin/sh\necho hello\n",
++    "python-script": b"#!/usr/bin/env python3\nprint(1)\n",
++}
++
++GOOD = {
++    "report.pdf": (b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n", "application/pdf"),
++    "chart.png": (b"\x89PNG\r\n\x1a\n" + b"\x00" * 16, "image/png"),
++    "photo.jpg": (b"\xff\xd8\xff\xe0" + b"\x00" * 16, "image/jpeg"),
++    "notes.txt": (b"Access review completed.\n", "text/plain"),
++    "users.csv": (b"name,role\nalice,admin\n", "text/csv"),
++    "policy.docx": (b"PK\x03\x04" + b"\x00" * 26, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
++    "legacy.xls": (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 16, "application/vnd.ms-excel"),
++    "config.yaml": (b"key: value\n", "application/x-yaml"),
++    "empty.txt": (b"", "text/plain"),
++}
++
++
++def _file(name, content, content_type="application/octet-stream"):
++    return SimpleUploadedFile(name, content, content_type=content_type)
++
++
++class TestCheckEvidenceUpload:
++    @pytest.mark.parametrize("kind", sorted(EXECUTABLES))
++    def test_executables_refused_by_content_whatever_the_name(self, kind):
++        for name in ("evidence.txt", "evidence.pdf", "evidence.log"):
++            with pytest.raises(ValidationError):
++                check_evidence_upload(_file(name, EXECUTABLES[kind]))
++
++    @pytest.mark.parametrize("name", sorted(GOOD))
++    def test_ordinary_evidence_accepted(self, name):
++        content, content_type = GOOD[name]
++        check_evidence_upload(_file(name, content, content_type))
++
++    @pytest.mark.parametrize(
++        "name,content",
++        [
++            ("report.pdf", b"\x89PNG\r\n\x1a\n" + b"\x00" * 16),  # a PNG called .pdf
++            ("chart.png", b"%PDF-1.7\n"),  # a PDF called .png
++            ("policy.docx", b"plain text, not a document"),
++            ("notes.txt", b"text\x00with a NUL byte"),
++            ("notes.txt", b"%PDF-1.7\n"),  # a PDF called .txt
++            ("data.csv", b"PK\x03\x04" + b"\x00" * 26),  # an archive called .csv
++            ("clip.mp4", b"not a video at all"),
++        ],
++    )
++    def test_content_must_match_the_name(self, name, content):
++        with pytest.raises(ValidationError):
++            check_evidence_upload(_file(name, content))
++
++    def test_declared_type_must_match_the_name(self):
++        with pytest.raises(ValidationError):
++            check_evidence_upload(_file("chart.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 16, "application/pdf"))
++
++    def test_executable_declared_type_refused(self):
++        with pytest.raises(ValidationError):
++            check_evidence_upload(_file("notes.txt", b"harmless", "application/x-msdownload"))
++
++    def test_over_25_mb_refused_and_25_mb_accepted(self):
++        with pytest.raises(ValidationError):
++            check_evidence_upload(_file("big.txt", b"A" * (EVIDENCE_MAX_BYTES + 1), "text/plain"))
++        check_evidence_upload(_file("limit.txt", b"A" * EVIDENCE_MAX_BYTES, "text/plain"))
++
++    def test_the_cursor_is_left_where_it_was(self):
++        f = _file("notes.txt", b"hello")
++        check_evidence_upload(f)
++        assert f.read() == b"hello"
++
++
++@pytest.fixture
++def app_config():
++    startup(sender=None)
++
++
++@pytest.fixture
++def client_and_folder(app_config, settings, tmp_path):
++    settings.MEDIA_ROOT = str(tmp_path)
++    admin = User.objects.create_superuser("admin@goldline-upload-tests.com")
++    admin_group = UserGroup.objects.get(name="BI-UG-ADM")
++    admin.folder = admin_group.folder
++    admin.save()
++    admin_group.user_set.add(admin)
++    client = APIClient()
++    client.credentials(HTTP_AUTHORIZATION=f"Token {AuthToken.objects.create(user=admin)[1]}")
++    root = Folder.objects.get(content_type=Folder.ContentType.ROOT)
++    folder = Folder.objects.create(name="folder-goldline-uploads", parent_folder=root)
++    return client, folder
++
++
++@pytest.mark.django_db
++class TestEvidenceUploadApi:
++    def _post(self, client, folder, name, content, content_type):
++        return client.post(
++            "/api/evidences/",
++            {"name": f"ev-{name}", "folder": str(folder.id), "attachment": _file(name, content, content_type)},
++            format="multipart",
++        )
++
++    def test_executable_refused_tc_sr_027(self, client_and_folder):
++        client, folder = client_and_folder
++        r = self._post(client, folder, "run.exe", EXECUTABLES["windows"], "application/x-msdownload")
++        assert r.status_code == status.HTTP_400_BAD_REQUEST
++        assert not Evidence.objects.filter(name="ev-run.exe").exists()
++
++    @pytest.mark.parametrize("kind", ["windows", "linux", "shell-script", "webassembly"])
++    def test_renamed_executable_refused(self, client_and_folder, kind):
++        client, folder = client_and_folder
++        r = self._post(client, folder, "notes.txt", EXECUTABLES[kind], "text/plain")
++        assert r.status_code == status.HTTP_400_BAD_REQUEST, kind
++        assert not EvidenceRevision.objects.filter(evidence__folder=folder).exists()
++
++    def test_mismatched_type_refused(self, client_and_folder):
++        client, folder = client_and_folder
++        r = self._post(client, folder, "report.pdf", GOOD["chart.png"][0], "application/pdf")
++        assert r.status_code == status.HTTP_400_BAD_REQUEST
++
++    def test_over_25_mb_refused_tc_sr_028(self, client_and_folder):
++        client, folder = client_and_folder
++        r = self._post(client, folder, "big.txt", b"A" * (EVIDENCE_MAX_BYTES + 1), "text/plain")
++        assert r.status_code == status.HTTP_400_BAD_REQUEST
++        assert not Evidence.objects.filter(name="ev-big.txt").exists()
++
++    def test_ordinary_pdf_accepted(self, client_and_folder):
++        client, folder = client_and_folder
++        content, content_type = GOOD["report.pdf"]
++        r = self._post(client, folder, "report.pdf", content, content_type)
++        assert r.status_code == status.HTTP_201_CREATED, r.content
++        revision = EvidenceRevision.objects.get(evidence__name="ev-report.pdf")
++        assert revision.attachment.read() == content
++
++    def test_raw_attachment_upload_refuses_an_executable(self, client_and_folder):
++        client, folder = client_and_folder
++        evidence = Evidence.objects.create(name="ev-raw", folder=folder)
++        r = client.post(
++            f"/api/evidences/{evidence.id}/upload/",
++            data=EXECUTABLES["linux"],
++            content_type="text/plain",
++            HTTP_CONTENT_DISPOSITION='attachment; filename="notes.txt"',
++        )
++        assert r.status_code == status.HTTP_400_BAD_REQUEST
++        ok = client.post(
++            f"/api/evidences/{evidence.id}/upload/",
++            data=b"%PDF-1.4 fine",
++            content_type="application/pdf",
++            HTTP_CONTENT_DISPOSITION='attachment; filename="fine.pdf"',
++        )
++        assert ok.status_code == status.HTTP_200_OK, ok.content
++
++    def test_revision_upload_refuses_an_executable(self, client_and_folder):
++        client, folder = client_and_folder
++        evidence = Evidence.objects.create(name="ev-rev", folder=folder)
++        r = client.post(
++            "/api/evidence-revisions/",
++            {"evidence": str(evidence.id), "attachment": _file("notes.txt", EXECUTABLES["shell-script"], "text/plain")},
++            format="multipart",
++        )
++        assert r.status_code == status.HTTP_400_BAD_REQUEST
+diff --git a/frontend/src/lib/components/FrameworkBuilder/FrameworkBuilder.svelte b/frontend/src/lib/components/FrameworkBuilder/FrameworkBuilder.svelte
+index f9a26c9..71698b4 100644
+--- a/frontend/src/lib/components/FrameworkBuilder/FrameworkBuilder.svelte
++++ b/frontend/src/lib/components/FrameworkBuilder/FrameworkBuilder.svelte
+@@ -675,7 +675,7 @@
+ 											type="text"
+ 											value={$frameworkStore.urn_namespace ?? 'custom'}
+ 											placeholder="custom"
+-											pattern="[a-zA-Z0-9_-]+"
++											pattern="[a-zA-Z0-9_\-]+"
+ 											class="mt-1 w-48 text-sm font-mono border border-surface-200-800 rounded bg-surface-100-900 px-2 py-1 text-surface-950-50 focus:border-blue-500 outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40 {lockUrnEdits
+ 												? 'text-surface-500 cursor-not-allowed'
+ 												: ''}"
+@@ -696,7 +696,7 @@
+ 											type="text"
+ 											value={$frameworkStore.ref_id ?? ''}
+ 											placeholder="my-framework"
+-											pattern="[a-zA-Z0-9_-]+"
++											pattern="[a-zA-Z0-9_\-]+"
+ 											class="mt-1 w-48 text-sm font-mono border border-surface-200-800 rounded bg-surface-100-900 px-2 py-1 text-surface-950-50 focus:border-blue-500 outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40 {lockUrnEdits
+ 												? 'text-surface-500 cursor-not-allowed'
+ 												: ''}"
+diff --git a/frontend/src/lib/utils/pattern-attributes.test.ts b/frontend/src/lib/utils/pattern-attributes.test.ts
+new file mode 100644
+index 0000000..fbaab98
+--- /dev/null
++++ b/frontend/src/lib/utils/pattern-attributes.test.ts
+@@ -0,0 +1,91 @@
++// Goldline (v4.1.1-goldline.8): every value that ends up in an input's pattern attribute compiles with the v flag,
++// which is how Chrome and Firefox now compile pattern attributes (an invalid one logs a console error).
++import { readdirSync, readFileSync, statSync } from 'fs';
++import path from 'path';
++import { describe, expect, it } from 'vitest';
++import { zod4 as zod } from 'sveltekit-superforms/adapters';
++import * as schemas from './schemas';
++import { mfaAuthenticateSchema } from '../../routes/(authentication)/login/mfa/utils/schemas';
++
++function patternsIn(node: unknown, out: string[] = []): string[] {
++	if (node && typeof node === 'object') {
++		for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
++			if (k === 'pattern' && typeof v === 'string') out.push(v);
++			else patternsIn(v, out);
++		}
++	}
++	return out;
++}
++
++function compilesWithV(p: string): boolean {
++	try {
++		new RegExp(p, 'v');
++		return true;
++	} catch {
++		return false;
++	}
++}
++
++function svelteFiles(dir: string, out: string[] = []): string[] {
++	for (const name of readdirSync(dir)) {
++		const full = path.join(dir, name);
++		if (statSync(full).isDirectory()) svelteFiles(full, out);
++		else if (full.endsWith('.svelte')) out.push(full);
++	}
++	return out;
++}
++
++describe('pattern attributes compile with the v flag', () => {
++	it('the email pattern is valid with the v flag and accepts the same addresses as before', () => {
++		expect(compilesWithV(schemas.EMAIL_PATTERN.source)).toBe(true);
++		const v = new RegExp(schemas.EMAIL_PATTERN.source, 'v');
++		for (const ok of ['a@b.co', 'first.last@example.co.uk', "o'neil+tag@x.io", 'a-b_c@sub.do-main.org']) {
++			expect(v.test(ok), ok).toBe(true);
++		}
++		for (const bad of ['a@b', '.a@b.co', 'a..b@c.co', 'a@-b.co', 'a b@c.co', 'a@b.c']) {
++			expect(v.test(bad), bad).toBe(false);
++		}
++	});
++
++	it('the email fields carry the v-safe pattern', () => {
++		const c = zod(schemas.loginSchema).constraints as Record<string, { pattern?: string }>;
++		expect(c.username.pattern).toBe(schemas.EMAIL_PATTERN.source);
++	});
++
++	it('every pattern constraint generated from the form schemas compiles with the v flag', () => {
++		const all = { ...schemas, mfaAuthenticateSchema } as Record<string, unknown>;
++		const bad: string[] = [];
++		let checked = 0;
++		for (const [name, schema] of Object.entries(all)) {
++			if (!schema || typeof schema !== 'object' || !('_zod' in (schema as object))) continue;
++			let constraints: unknown;
++			try {
++				constraints = zod(schema as never).constraints;
++			} catch {
++				continue; // not an object schema a form can be built from
++			}
++			for (const p of patternsIn(constraints)) {
++				checked++;
++				if (!compilesWithV(p)) bad.push(`${name}: ${p}`);
++			}
++		}
++		expect(checked).toBeGreaterThan(0);
++		expect(bad).toEqual([]);
++	});
++
++	it('every literal pattern attribute in the components compiles with the v flag', () => {
++		const root = path.resolve(__dirname, '..', '..');
++		const bad: string[] = [];
++		for (const file of svelteFiles(root)) {
++			const text = readFileSync(file, 'utf8');
++			for (const m of text.matchAll(/\bpattern="([^"{]+)"/g)) {
++				if (!compilesWithV(m[1])) bad.push(`${path.relative(root, file)}: ${m[1]}`);
++			}
++			for (const m of text.matchAll(/\bpattern:\s*'([^']+)'/g)) {
++				const p = m[1].replace(/\\\\/g, '\\');
++				if (!compilesWithV(p)) bad.push(`${path.relative(root, file)}: ${p}`);
++			}
++		}
++		expect(bad).toEqual([]);
++	});
++});
+diff --git a/frontend/src/lib/utils/schemas.ts b/frontend/src/lib/utils/schemas.ts
+index 6fa5dc9..b11af5a 100644
+--- a/frontend/src/lib/utils/schemas.ts
++++ b/frontend/src/lib/utils/schemas.ts
+@@ -71,13 +71,19 @@ export const quickStartSchema = z.object({
+ 	risk_assessment_name: z.string().optional()
+ });
+ 
++// Goldline (v4.1.1-goldline.8): the library's default email pattern is invalid under the v flag that browsers now use
++// for an input's pattern attribute (unescaped '-' in a character class), which logs a console error on every email
++// field. Same addresses accepted; '-' escaped.
++export const EMAIL_PATTERN =
++	/^(?:[A-Za-z0-9_'+\-]+\.)*[A-Za-z0-9_'+\-]*[A-Za-z0-9_+\-]@(?:[A-Za-z0-9][A-Za-z0-9\-]*\.)+[A-Za-z]{2,}$/;
++
+ export const loginSchema = z
+ 	.object({
+ 		username: z
+ 			.string({
+ 				error: 'Email is required'
+ 			})
+-			.email(),
++			.email({ pattern: EMAIL_PATTERN }),
+ 		password: z.string({
+ 			error: 'Password is required'
+ 		})
+@@ -515,7 +521,7 @@ export const RequirementAssessmentSchema = z.object({
+ });
+ 
+ export const UserEditSchema = z.object({
+-	email: z.string().email(),
++	email: z.string().email({ pattern: EMAIL_PATTERN }),
+ 	language: z.string().optional().default(''),
+ 	first_name: z.string().optional(),
+ 	last_name: z.string().optional(),
+@@ -528,7 +534,7 @@ export const UserEditSchema = z.object({
+ });
+ 
+ export const UserCreateSchema = z.object({
+-	email: z.string().email(),
++	email: z.string().email({ pattern: EMAIL_PATTERN }),
+ 	language: z.string().optional().default(''),
+ 	observation: z.string().optional().nullable(),
+ 	expiry_date: z
+@@ -723,7 +729,7 @@ export const GeneralSettingsSchema = z.object({
+ 	default_date_format: z.string().default('auto').optional(),
+ 	default_packager: z
+ 		.string()
+-		.regex(/^[a-z0-9_-]+$/)
++		.regex(/^[a-z0-9_\-]+$/)
+ 		.default('custom')
+ 		.optional(),
+ 	llm_provider: z.string().default('ollama').optional(),
+@@ -1041,7 +1047,7 @@ export const solutionSchema = z.object({
+ export const representativeSchema = z.object({
+ 	create_user: z.boolean().optional().default(false),
+ 	language: z.string().optional().default(''),
+-	email: z.string().email(),
++	email: z.string().email({ pattern: EMAIL_PATTERN }),
+ 	entity: z.string(),
+ 	first_name: z.string().optional(),
+ 	last_name: z.string().optional(),
+@@ -2127,7 +2133,7 @@ export const DashboardWidgetSchema = z.object({
+ 
+ export const teamSchema = z.object({
+ 	...NameDescriptionMixin,
+-	team_email: z.string().email().optional(),
++	team_email: z.string().email({ pattern: EMAIL_PATTERN }).optional(),
+ 	folder: z.string(),
+ 	members: z.array(z.string().uuid().optional()).optional(),
+ 	leader: z.string().uuid().optional().nullable(),

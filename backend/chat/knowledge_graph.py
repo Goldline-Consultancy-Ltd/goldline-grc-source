@@ -92,6 +92,29 @@ class DiGraph:
     def get(self, node_id: str, default=None):
         return self._nodes.get(node_id, default)
 
+    # Goldline GRC (FND-025): plain-data form for the disk cache, so the cache is JSON and never unpickled.
+    def to_data(self) -> dict[str, Any]:
+        return {
+            "format": _CACHE_FORMAT,
+            "nodes": self._nodes,
+            "out": self._out,
+            "in": {dst: list(sources) for dst, sources in self._in.items()},
+        }
+
+    @classmethod
+    def from_data(cls, data: dict[str, Any]) -> "DiGraph":
+        if not isinstance(data, dict) or data.get("format") != _CACHE_FORMAT:
+            raise ValueError("knowledge graph cache is not in the expected format")
+        nodes, out, inn = data["nodes"], data["out"], data["in"]
+        if not (isinstance(nodes, dict) and isinstance(out, dict) and isinstance(inn, dict)):
+            raise ValueError("knowledge graph cache is malformed")
+        g = cls()
+        g._nodes = nodes
+        g._out = out
+        # in-edges share the out-edge attribute dicts, exactly as add_edge leaves them
+        g._in = {dst: {src: out[src][dst] for src in sources} for dst, sources in inn.items()}
+        return g
+
 
 # ---------------------------------------------------------------------------
 # Singleton graph management
@@ -101,7 +124,11 @@ _graph: DiGraph | None = None
 _graph_lock = threading.Lock()
 
 _CACHE_DIR = Path(__file__).resolve().parent.parent / "db" / "cache"
-_CACHE_FILE = _CACHE_DIR / "knowledge_graph.pkl"
+# Goldline GRC (FND-025, python_deserialization_rule-pickle): the cache is JSON, not pickle. db/ is the persistent
+# volume shared with uploaded attachments, so a cache file must never be able to run code when it is read.
+_CACHE_FILE = _CACHE_DIR / "knowledge_graph.json"
+_LEGACY_PICKLE_CACHE = _CACHE_DIR / "knowledge_graph.pkl"  # never read; removed when a JSON cache is written
+_CACHE_FORMAT = "goldline-knowledge-graph-v1"
 
 
 def get_graph() -> DiGraph:
@@ -140,7 +167,7 @@ def _get_library_mtime() -> float:
 
 def _load_or_build() -> DiGraph:
     """Try loading from disk cache; rebuild from YAML if stale or missing."""
-    import pickle
+    import json
 
     try:
         if _CACHE_FILE.exists():
@@ -148,11 +175,8 @@ def _load_or_build() -> DiGraph:
             lib_mtime = _get_library_mtime()
             if cache_mtime >= lib_mtime:
                 t0 = time.time()
-                with open(_CACHE_FILE, "rb") as f:
-                    # SECURITY: This pickle file is application-generated
-                    # (written by _save_cache below), not user-uploaded.
-                    # The cache directory (db/cache/) is not web-accessible.
-                    graph = pickle.load(f)  # nosec B301
+                with open(_CACHE_FILE, "r", encoding="utf-8") as f:
+                    graph = DiGraph.from_data(json.load(f))
                 logger.info(
                     "knowledge_graph_loaded_from_cache",
                     duration=round(time.time() - t0, 2),
@@ -170,16 +194,27 @@ def _load_or_build() -> DiGraph:
 
 
 def _save_cache(graph: DiGraph) -> None:
-    """Persist the graph to disk for fast loading."""
-    import pickle
+    """Persist the graph to disk for fast loading (JSON; written to a temporary file, then renamed)."""
+    import json
+    import os
 
+    tmp = _CACHE_FILE.with_name(f"{_CACHE_FILE.name}.{os.getpid()}.tmp")
     try:
         _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        with open(_CACHE_FILE, "wb") as f:
-            pickle.dump(graph, f, protocol=pickle.HIGHEST_PROTOCOL)
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(graph.to_data(), f, ensure_ascii=False, separators=(",", ":"))
+        os.replace(tmp, _CACHE_FILE)
         logger.info("knowledge_graph_cache_saved", path=str(_CACHE_FILE))
+        try:
+            _LEGACY_PICKLE_CACHE.unlink(missing_ok=True)
+        except OSError:
+            pass
     except Exception as e:
         logger.warning("knowledge_graph_cache_save_failed", error=e)
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _build_graph() -> DiGraph:
