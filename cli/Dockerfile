@@ -41,6 +41,9 @@ ENV CA_MCP_TRANSPORT=streamable-http \
   CA_MCP_HOST=0.0.0.0 \
   CA_MCP_PORT=8001
 
+# Goldline GRC (FND-012, DS-0002): state the non-root user explicitly (the hardened runtime image's own default).
+USER nonroot
+
 EXPOSE 8001
 
 # Exec form: no shell in a distroless runtime
